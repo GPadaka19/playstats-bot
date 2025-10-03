@@ -304,7 +304,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
-		msg := fmt.Sprintf("🎮 %s, %s selama %s", m.Author.Username, name, formatDuration(totalSeconds))
+		msg := fmt.Sprintf("🎮 %s, membuka %s selama %s", m.Author.Username, name, formatDuration(totalSeconds))
 		s.ChannelMessageSend(m.ChannelID, msg)
 		return
 	}
