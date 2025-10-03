@@ -15,7 +15,13 @@ import (
 )
 
 var db *sql.DB
-var sessions = make(map[string]time.Time) // key: guildID:userID -> joinTime
+
+type VoiceSession struct {
+	start     time.Time
+	channelID string
+}
+
+var sessions = make(map[string]VoiceSession) // key: guildID:userID -> voice session (UTC start + channel)
 var activitySessions = make(map[string]time.Time) // key: guildID:userID:activity -> startTime
 var tzUTC7 = time.FixedZone("UTC+7", 7*3600)
 
@@ -91,6 +97,18 @@ func createTable() {
 	if err != nil {
 		log.Fatal("DB create activity table error:", err)
 	}
+
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS voice_channel_hours (
+		user_id TEXT NOT NULL,
+		guild_id TEXT NOT NULL,
+		channel_id TEXT NOT NULL,
+		total_seconds BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (user_id, guild_id, channel_id)
+	)`)
+	if err != nil {
+		log.Fatal("DB create voice channel table error:", err)
+	}
 }
 
 // Migrasi dari kolom total_minutes ke total_seconds jika masih ada skema lama
@@ -137,19 +155,21 @@ func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	key := guildID + ":" + userID
 
 	// Join channel
-	if vs.ChannelID != "" && sessions[key].IsZero() {
-		sessions[key] = time.Now().UTC()
-		fmt.Println("➡️ Join:", userID, sessions[key].In(tzUTC7))
+	if vs.ChannelID != "" && sessions[key].start.IsZero() {
+		sessions[key] = VoiceSession{start: time.Now().UTC(), channelID: vs.ChannelID}
+		fmt.Println("➡️ Join:", userID, sessions[key].start.In(tzUTC7), "channel=", vs.ChannelID)
 	}
 
 	// Leave channel
-	if vs.ChannelID == "" && !sessions[key].IsZero() {
-		start := sessions[key]
+	if vs.ChannelID == "" && !sessions[key].start.IsZero() {
+		start := sessions[key].start
+		channelID := sessions[key].channelID
 		durationSeconds := int64(time.Since(start).Seconds())
 		delete(sessions, key)
 
 		addSeconds(userID, guildID, durationSeconds)
-		fmt.Printf("⬅️ Leave: %s, +%d seconds\n", userID, durationSeconds)
+		addChannelSeconds(userID, guildID, channelID, durationSeconds)
+		fmt.Printf("⬅️ Leave: %s, +%d seconds channel=%s\n", userID, durationSeconds, channelID)
 	}
 }
 
@@ -221,6 +241,18 @@ func addActivitySeconds(userID, guildID, activityName string, seconds int64) {
 	}
 }
 
+// Simpan detik per channel ke DB
+func addChannelSeconds(userID, guildID, channelID string, seconds int64) {
+	_, err := db.Exec(`
+	INSERT INTO voice_channel_hours (user_id, guild_id, channel_id, total_seconds)
+	VALUES ($1, $2, $3, $4)
+	ON CONFLICT (user_id, guild_id, channel_id) DO UPDATE SET total_seconds = voice_channel_hours.total_seconds + EXCLUDED.total_seconds`,
+		userID, guildID, channelID, seconds)
+	if err != nil {
+		log.Println("DB voice channel error:", err)
+	}
+}
+
 func formatDuration(totalSeconds int64) string {
 	h := totalSeconds / 3600
 	m := (totalSeconds % 3600) / 60
@@ -234,13 +266,30 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 	content := strings.TrimSpace(m.Content)
-	if content == "!voice" {
-		var totalSeconds int64
-		err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&totalSeconds)
-		if err != nil && err != sql.ErrNoRows {
+	if content == "!voice" || strings.HasPrefix(content, "!voicechan") {
+		// Ambil total per channel (urut desc)
+		rows, err := db.Query("SELECT channel_id, total_seconds FROM voice_channel_hours WHERE user_id = $1 AND guild_id = $2 ORDER BY total_seconds DESC", m.Author.ID, m.GuildID)
+		if err != nil {
 			log.Println("DB error:", err)
+			s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil data voice per channel.")
+			return
 		}
-		msg := fmt.Sprintf("⏱️ %s, total voice: %s", m.Author.Username, formatDuration(totalSeconds))
+		defer rows.Close()
+		var lines []string
+		for rows.Next() {
+			var channelID string
+			var sec int64
+			if err := rows.Scan(&channelID, &sec); err == nil {
+				lines = append(lines, fmt.Sprintf("<#%s>: %s", channelID, formatDuration(sec)))
+			}
+		}
+		// Ambil total keseluruhan
+		var totalSeconds int64
+		_ = db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&totalSeconds)
+		if len(lines) == 0 {
+			lines = append(lines, "(belum ada data per channel)")
+		}
+		msg := fmt.Sprintf("🔊 %s, voice per channel:\n%s\nTotal: %s", m.Author.Username, strings.Join(lines, "\n"), formatDuration(totalSeconds))
 		s.ChannelMessageSend(m.ChannelID, msg)
 		return
 	}
