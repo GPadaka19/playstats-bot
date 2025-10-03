@@ -52,7 +52,7 @@ func main() {
 		log.Fatal("error creating Discord session,", err)
 	}
 
-	dg.Identify.Intents = discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildPresences | discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages
 
 	dg.AddHandler(voiceStateUpdate)
 	dg.AddHandler(messageCreate)
@@ -157,6 +157,7 @@ func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 	guildID := p.GuildID
 	userID := p.User.ID
+	log.Printf("presenceUpdate: guild=%s user=%s activities=%d", guildID, userID, len(p.Activities))
 
 	// Kumpulkan nama aktivitas yang relevan (Game/Application)
 	activeSet := make(map[string]bool)
@@ -164,6 +165,7 @@ func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 		name := act.Name
 		if name != "" {
 			activeSet[name] = true
+			log.Printf("activity on: %s | %s", userID, name)
 		}
 	}
 
@@ -181,6 +183,7 @@ func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 			seconds := int64(time.Since(start).Seconds())
 			delete(activitySessions, key)
 			addActivitySeconds(userID, guildID, activityName, seconds)
+			log.Printf("activity off: %s | %s +%ds", userID, activityName, seconds)
 		}
 	}
 
@@ -189,6 +192,7 @@ func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 		key := guildID + ":" + userID + ":" + name
 		if activitySessions[key].IsZero() {
 			activitySessions[key] = time.Now().UTC()
+			log.Printf("activity start: %s | %s", userID, name)
 		}
 	}
 }
