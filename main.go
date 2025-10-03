@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -15,6 +16,7 @@ import (
 
 var db *sql.DB
 var sessions = make(map[string]time.Time) // key: guildID:userID -> joinTime
+var activitySessions = make(map[string]time.Time) // key: guildID:userID:activity -> startTime
 var tzUTC7 = time.FixedZone("UTC+7", 7*3600)
 
 func main() {
@@ -54,6 +56,7 @@ func main() {
 
 	dg.AddHandler(voiceStateUpdate)
 	dg.AddHandler(messageCreate)
+	dg.AddHandler(presenceUpdate)
 
 	err = dg.Open()
 	if err != nil {
@@ -75,6 +78,18 @@ func createTable() {
 	)`)
 	if err != nil {
 		log.Fatal("DB create table error:", err)
+	}
+
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS activity_hours (
+		user_id TEXT NOT NULL,
+		guild_id TEXT NOT NULL,
+		activity_name TEXT NOT NULL,
+		total_seconds BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (user_id, guild_id, activity_name)
+	)`)
+	if err != nil {
+		log.Fatal("DB create activity table error:", err)
 	}
 }
 
@@ -138,6 +153,45 @@ func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	}
 }
 
+// Handler presence untuk melacak aktivitas bermain
+func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
+	guildID := p.GuildID
+	userID := p.User.ID
+
+	// Kumpulkan nama aktivitas yang relevan (Game/Application)
+	activeSet := make(map[string]bool)
+	for _, act := range p.Activities {
+		name := act.Name
+		if name != "" {
+			activeSet[name] = true
+		}
+	}
+
+	// Tutup aktivitas yang sebelumnya aktif tapi kini tidak
+	for key, start := range activitySessions {
+		// key format: guild:user:activity
+		// cek apakah key milik user+guild ini
+		prefix := guildID + ":" + userID + ":"
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		activityName := strings.TrimPrefix(key, prefix)
+		if !activeSet[activityName] {
+			// akumulasi durasi
+			seconds := int64(time.Since(start).Seconds())
+			delete(activitySessions, key)
+			addActivitySeconds(userID, guildID, activityName, seconds)
+		}
+	}
+
+	// Mulai aktivitas baru yang belum tercatat
+	for name := range activeSet {
+		key := guildID + ":" + userID + ":" + name
+		if activitySessions[key].IsZero() {
+			activitySessions[key] = time.Now().UTC()
+		}
+	}
+}
 
 // Simpan detik ke DB
 func addSeconds(userID string, guildID string, seconds int64) {
@@ -151,21 +205,78 @@ func addSeconds(userID string, guildID string, seconds int64) {
 	}
 }
 
+// Simpan detik aktivitas ke DB
+func addActivitySeconds(userID, guildID, activityName string, seconds int64) {
+	_, err := db.Exec(`
+	INSERT INTO activity_hours (user_id, guild_id, activity_name, total_seconds)
+	VALUES ($1, $2, $3, $4)
+	ON CONFLICT (user_id, guild_id, activity_name) DO UPDATE SET total_seconds = activity_hours.total_seconds + EXCLUDED.total_seconds`,
+		userID, guildID, activityName, seconds)
+	if err != nil {
+		log.Println("DB activity error:", err)
+	}
+}
+
+func formatDuration(totalSeconds int64) string {
+	h := totalSeconds / 3600
+	m := (totalSeconds % 3600) / 60
+	s := totalSeconds % 60
+	return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+}
+
 // Command !stats
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.Bot {
 		return
 	}
-	if m.Content == "!stats" {
+	content := strings.TrimSpace(m.Content)
+	if content == "!voice" {
 		var totalSeconds int64
 		err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&totalSeconds)
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
-		h := totalSeconds / 3600
-		mnt := (totalSeconds % 3600) / 60
-		sec := totalSeconds % 60
-		msg := fmt.Sprintf("⏱️ %s, kamu sudah voice selama %d:%02d:%02d", m.Author.Username, h, mnt, sec)
+		msg := fmt.Sprintf("⏱️ %s, total voice: %s", m.Author.Username, formatDuration(totalSeconds))
 		s.ChannelMessageSend(m.ChannelID, msg)
+		return
+	}
+	if strings.HasPrefix(content, "!play") {
+		name := strings.TrimSpace(strings.TrimPrefix(content, "!play"))
+		if name == "" {
+			s.ChannelMessageSend(m.ChannelID, "Format: !play <nama game/aplikasi>")
+			return
+		}
+		var totalSeconds int64
+		err := db.QueryRow("SELECT total_seconds FROM activity_hours WHERE user_id = $1 AND guild_id = $2 AND activity_name = $3", m.Author.ID, m.GuildID, name).Scan(&totalSeconds)
+		if err != nil && err != sql.ErrNoRows {
+			log.Println("DB error:", err)
+		}
+		msg := fmt.Sprintf("🎮 %s, %s selama %s", m.Author.Username, name, formatDuration(totalSeconds))
+		s.ChannelMessageSend(m.ChannelID, msg)
+		return
+	}
+	if content == "!stats" {
+		// ringkas: total voice + 3 aktivitas teratas
+		var voiceSeconds int64
+		_ = db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&voiceSeconds)
+
+		rows, err := db.Query("SELECT activity_name, total_seconds FROM activity_hours WHERE user_id = $1 AND guild_id = $2 ORDER BY total_seconds DESC LIMIT 3", m.Author.ID, m.GuildID)
+		if err != nil {
+			log.Println("DB error:", err)
+			s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil statistik.")
+			return
+		}
+		defer rows.Close()
+		var lines []string
+		for rows.Next() {
+			var name string
+			var sec int64
+			if err := rows.Scan(&name, &sec); err == nil {
+				lines = append(lines, fmt.Sprintf("- %s: %s", name, formatDuration(sec)))
+			}
+		}
+		msg := fmt.Sprintf("📊 %s\nVoice: %s\nAktivitas teratas:\n%s", m.Author.Username, formatDuration(voiceSeconds), strings.Join(lines, "\n"))
+		s.ChannelMessageSend(m.ChannelID, msg)
+		return
 	}
 }
