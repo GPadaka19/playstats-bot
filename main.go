@@ -14,7 +14,7 @@ import (
 )
 
 var db *sql.DB
-var sessions = make(map[string]time.Time) // userID -> joinTime
+var sessions = make(map[string]time.Time) // key: guildID:userID -> joinTime
 var tzUTC7 = time.FixedZone("UTC+7", 7*3600)
 
 func main() {
@@ -107,21 +107,23 @@ func migrateSchema() {
 
 // Listener ketika user join/leave voice channel
 func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
-	userID := vs.UserID
+    userID := vs.UserID
+    guildID := vs.GuildID
+    key := guildID + ":" + userID
 
     // Join channel
-    if vs.ChannelID != "" && sessions[userID].IsZero() {
-        sessions[userID] = time.Now().UTC()
-        fmt.Println("➡️ Join:", userID, sessions[userID].In(tzUTC7))
+    if vs.ChannelID != "" && sessions[key].IsZero() {
+        sessions[key] = time.Now().UTC()
+        fmt.Println("➡️ Join:", userID, sessions[key].In(tzUTC7))
     }
 
     // Leave channel
-    if vs.ChannelID == "" && !sessions[userID].IsZero() {
-        start := sessions[userID]
+    if vs.ChannelID == "" && !sessions[key].IsZero() {
+        start := sessions[key]
 		durationSeconds := int64(time.Since(start).Seconds())
-        delete(sessions, userID)
+        delete(sessions, key)
 
-		addSeconds(userID, durationSeconds)
+		addSeconds(key, durationSeconds)
 		fmt.Printf("⬅️ Leave: %s, +%d seconds\n", userID, durationSeconds)
     }
 }
@@ -144,9 +146,10 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.Bot {
 		return
 	}
-	if m.Content == "!stats" {
-		var totalSeconds int64
-		err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1", m.Author.ID).Scan(&totalSeconds)
+    if m.Content == "!stats" {
+        var totalSeconds int64
+        key := m.GuildID + ":" + m.Author.ID
+        err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1", key).Scan(&totalSeconds)
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
