@@ -68,8 +68,10 @@ func main() {
 func createTable() {
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS voice_hours (
-		user_id TEXT PRIMARY KEY,
-		total_seconds BIGINT NOT NULL DEFAULT 0
+		user_id TEXT NOT NULL,
+		guild_id TEXT NOT NULL,
+		total_seconds BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (user_id, guild_id)
 	)`)
 	if err != nil {
 		log.Fatal("DB create table error:", err)
@@ -78,64 +80,72 @@ func createTable() {
 
 // Migrasi dari kolom total_minutes ke total_seconds jika masih ada skema lama
 func migrateSchema() {
-	var exists bool
-	q := `SELECT EXISTS (
-		SELECT 1 FROM information_schema.columns
-		WHERE table_name='voice_hours' AND column_name='total_minutes'
-	)`
-	if err := db.QueryRow(q).Scan(&exists); err != nil {
-		log.Println("schema check error:", err)
-		return
-	}
-	if !exists {
-		return
-	}
+	// Pastikan kolom total_seconds ada (untuk versi sangat lama)
+	_, _ = db.Exec(`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS total_seconds BIGINT NOT NULL DEFAULT 0`)
 
-	if _, err := db.Exec(`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS total_seconds BIGINT NOT NULL DEFAULT 0`); err != nil {
-		log.Println("schema add total_seconds error:", err)
-		return
-	}
-	if _, err := db.Exec(`UPDATE voice_hours SET total_seconds = total_minutes * 60 WHERE total_seconds = 0`); err != nil {
-		log.Println("schema migrate data error:", err)
-		return
-	}
-	if _, err := db.Exec(`ALTER TABLE voice_hours DROP COLUMN IF EXISTS total_minutes`); err != nil {
-		log.Println("schema drop total_minutes error:", err)
-		return
-	}
+	// Jika masih ada total_minutes, migrasikan ke detik lalu hapus kolom lama
+	_, _ = db.Exec(`UPDATE voice_hours SET total_seconds = total_minutes * 60 WHERE total_seconds = 0 AND EXISTS (
+		SELECT 1 FROM information_schema.columns WHERE table_name='voice_hours' AND column_name='total_minutes'
+	)`)
+	_, _ = db.Exec(`ALTER TABLE voice_hours DROP COLUMN IF EXISTS total_minutes`)
+
+	// Tambahkan kolom guild_id bila belum ada
+	_, _ = db.Exec(`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS guild_id TEXT`)
+
+	// Migrasi data lama yang menyimpan gabungan 'guild:user' di user_id
+	_, _ = db.Exec(`UPDATE voice_hours SET guild_id = split_part(user_id, ':', 1) WHERE guild_id IS NULL AND position(':' in user_id) > 0`)
+	_, _ = db.Exec(`UPDATE voice_hours SET user_id = split_part(user_id, ':', 2) WHERE position(':' in user_id) > 0`)
+
+	// Isi nilai kosong default dan jadikan NOT NULL
+	_, _ = db.Exec(`UPDATE voice_hours SET guild_id = COALESCE(guild_id, '')`)
+	_, _ = db.Exec(`ALTER TABLE voice_hours ALTER COLUMN user_id SET NOT NULL`)
+	_, _ = db.Exec(`ALTER TABLE voice_hours ALTER COLUMN guild_id SET NOT NULL`)
+
+	// Pastikan primary key komposit (user_id, guild_id)
+	_, _ = db.Exec(`DO $$
+	DECLARE
+		pk_name text;
+	BEGIN
+		SELECT conname INTO pk_name FROM pg_constraint
+		WHERE contype = 'p' AND conrelid = 'voice_hours'::regclass;
+		IF pk_name IS NOT NULL THEN
+			EXECUTE format('ALTER TABLE voice_hours DROP CONSTRAINT %I', pk_name);
+		END IF;
+	END$$;`)
+	_, _ = db.Exec(`ALTER TABLE voice_hours ADD CONSTRAINT voice_hours_pkey PRIMARY KEY (user_id, guild_id)`)
 }
 
 // Listener ketika user join/leave voice channel
 func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
-    userID := vs.UserID
-    guildID := vs.GuildID
-    key := guildID + ":" + userID
+	userID := vs.UserID
+	guildID := vs.GuildID
+	key := guildID + ":" + userID
 
-    // Join channel
-    if vs.ChannelID != "" && sessions[key].IsZero() {
-        sessions[key] = time.Now().UTC()
-        fmt.Println("➡️ Join:", userID, sessions[key].In(tzUTC7))
-    }
+	// Join channel
+	if vs.ChannelID != "" && sessions[key].IsZero() {
+		sessions[key] = time.Now().UTC()
+		fmt.Println("➡️ Join:", userID, sessions[key].In(tzUTC7))
+	}
 
-    // Leave channel
-    if vs.ChannelID == "" && !sessions[key].IsZero() {
-        start := sessions[key]
+	// Leave channel
+	if vs.ChannelID == "" && !sessions[key].IsZero() {
+		start := sessions[key]
 		durationSeconds := int64(time.Since(start).Seconds())
-        delete(sessions, key)
+		delete(sessions, key)
 
-		addSeconds(key, durationSeconds)
+		addSeconds(userID, guildID, durationSeconds)
 		fmt.Printf("⬅️ Leave: %s, +%d seconds\n", userID, durationSeconds)
-    }
+	}
 }
 
 
 // Simpan detik ke DB
-func addSeconds(userID string, seconds int64) {
+func addSeconds(userID string, guildID string, seconds int64) {
 	_, err := db.Exec(`
-	INSERT INTO voice_hours (user_id, total_seconds)
-	VALUES ($1, $2)
-	ON CONFLICT (user_id) DO UPDATE SET total_seconds = voice_hours.total_seconds + EXCLUDED.total_seconds`,
-		userID, seconds)
+	INSERT INTO voice_hours (user_id, guild_id, total_seconds)
+	VALUES ($1, $2, $3)
+	ON CONFLICT (user_id, guild_id) DO UPDATE SET total_seconds = voice_hours.total_seconds + EXCLUDED.total_seconds`,
+		userID, guildID, seconds)
 	if err != nil {
 		log.Println("DB error:", err)
 	}
@@ -146,7 +156,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.Bot {
 		return
 	}
-    if m.Content == "!stats" {
+    if m.Content == "/stats" {
         var totalSeconds int64
         key := m.GuildID + ":" + m.Author.ID
         err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1", key).Scan(&totalSeconds)
