@@ -15,6 +15,7 @@ import (
 
 var db *sql.DB
 var sessions = make(map[string]time.Time) // userID -> joinTime
+var tzUTC7 = time.FixedZone("UTC+7", 7*3600)
 
 func main() {
     if err := godotenv.Load(); err != nil {
@@ -78,21 +79,21 @@ func createTable() {
 func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	userID := vs.UserID
 
-	// Join channel
-	if vs.ChannelID != "" && sessions[userID].IsZero() {
-		sessions[userID] = time.Now()
-		fmt.Println("➡️ Join:", userID, sessions[userID])
-	}
+    // Join channel
+    if vs.ChannelID != "" && sessions[userID].IsZero() {
+        sessions[userID] = time.Now().UTC()
+        fmt.Println("➡️ Join:", userID, sessions[userID].In(tzUTC7))
+    }
 
-	// Leave channel
-	if vs.ChannelID == "" && !sessions[userID].IsZero() {
-		start := sessions[userID]
-		duration := time.Since(start).Minutes()
-		delete(sessions, userID)
+    // Leave channel
+    if vs.ChannelID == "" && !sessions[userID].IsZero() {
+        start := sessions[userID]
+        duration := time.Since(start).Minutes()
+        delete(sessions, userID)
 
-		addMinutes(userID, int64(duration))
-		fmt.Printf("⬅️ Leave: %s, +%.1f minutes\n", userID, duration)
-	}
+        addMinutes(userID, int64(duration))
+        fmt.Printf("⬅️ Leave: %s, +%.1f minutes\n", userID, duration)
+    }
 }
 
 // Simpan menit ke DB
@@ -118,8 +119,11 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
-		hours := float64(total) / 60.0
-		msg := fmt.Sprintf("⏱️ %s, kamu sudah voice selama %.2f jam", m.Author.Username, hours)
+        totalSeconds := total * 60
+        h := totalSeconds / 3600
+        mnt := (totalSeconds % 3600) / 60
+        sec := totalSeconds % 60
+        msg := fmt.Sprintf("⏱️ %s, kamu sudah voice selama %d:%02d:%02d", m.Author.Username, h, mnt, sec)
 		s.ChannelMessageSend(m.ChannelID, msg)
 	}
 }
