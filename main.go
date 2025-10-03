@@ -156,17 +156,16 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.Bot {
 		return
 	}
-    if m.Content == "!stats" {
-        var totalSeconds int64
-        key := m.GuildID + ":" + m.Author.ID
-        err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1", key).Scan(&totalSeconds)
+	if m.Content == "!stats" {
+		var totalSeconds int64
+		err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&totalSeconds)
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
-        h := totalSeconds / 3600
-        mnt := (totalSeconds % 3600) / 60
-        sec := totalSeconds % 60
-        msg := fmt.Sprintf("⏱️ %s, kamu sudah voice selama %d:%02d:%02d", m.Author.Username, h, mnt, sec)
+		h := totalSeconds / 3600
+		mnt := (totalSeconds % 3600) / 60
+		sec := totalSeconds % 60
+		msg := fmt.Sprintf("⏱️ %s, kamu sudah voice selama %d:%02d:%02d", m.Author.Username, h, mnt, sec)
 		s.ChannelMessageSend(m.ChannelID, msg)
 	}
 }
