@@ -89,10 +89,9 @@ func createTable() {
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS activity_hours (
 		user_id TEXT NOT NULL,
-		guild_id TEXT NOT NULL,
 		activity_name TEXT NOT NULL,
 		total_seconds BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (user_id, guild_id, activity_name)
+		PRIMARY KEY (user_id, activity_name)
 	)`)
 	if err != nil {
 		log.Fatal("DB create activity table error:", err)
@@ -122,18 +121,15 @@ func migrateSchema() {
 	)`)
 	_, _ = db.Exec(`ALTER TABLE voice_hours DROP COLUMN IF EXISTS total_minutes`)
 
-	// Tambahkan kolom guild_id bila belum ada
+	// Tambahkan kolom guild_id bila belum ada di voice_hours
 	_, _ = db.Exec(`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS guild_id TEXT`)
-
 	// Migrasi data lama yang menyimpan gabungan 'guild:user' di user_id
 	_, _ = db.Exec(`UPDATE voice_hours SET guild_id = split_part(user_id, ':', 1) WHERE guild_id IS NULL AND position(':' in user_id) > 0`)
 	_, _ = db.Exec(`UPDATE voice_hours SET user_id = split_part(user_id, ':', 2) WHERE position(':' in user_id) > 0`)
-
 	// Isi nilai kosong default dan jadikan NOT NULL
 	_, _ = db.Exec(`UPDATE voice_hours SET guild_id = COALESCE(guild_id, '')`)
 	_, _ = db.Exec(`ALTER TABLE voice_hours ALTER COLUMN user_id SET NOT NULL`)
 	_, _ = db.Exec(`ALTER TABLE voice_hours ALTER COLUMN guild_id SET NOT NULL`)
-
 	// Pastikan primary key komposit (user_id, guild_id)
 	_, _ = db.Exec(`DO $$
 	DECLARE
@@ -146,6 +142,25 @@ func migrateSchema() {
 		END IF;
 	END$$;`)
 	_, _ = db.Exec(`ALTER TABLE voice_hours ADD CONSTRAINT voice_hours_pkey PRIMARY KEY (user_id, guild_id)`)
+
+	// Migrasi activity_hours lama (jika ada guild_id) menjadi global teragregasi
+	_, _ = db.Exec(`
+	CREATE TABLE IF NOT EXISTS activity_hours_new (
+		user_id TEXT NOT NULL,
+		activity_name TEXT NOT NULL,
+		total_seconds BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (user_id, activity_name)
+	)`)
+	// Agregasi dari skema lama ke baru
+	_, _ = db.Exec(`
+	INSERT INTO activity_hours_new (user_id, activity_name, total_seconds)
+	SELECT user_id, activity_name, SUM(total_seconds)
+	FROM activity_hours
+	GROUP BY user_id, activity_name
+	ON CONFLICT (user_id, activity_name) DO UPDATE SET total_seconds = activity_hours_new.total_seconds + EXCLUDED.total_seconds`)
+	// Ganti tabel
+	_, _ = db.Exec(`DROP TABLE IF EXISTS activity_hours`)
+	_, _ = db.Exec(`ALTER TABLE activity_hours_new RENAME TO activity_hours`)
 }
 
 // Listener ketika user join/leave voice channel
@@ -191,9 +206,8 @@ func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 
 	// Tutup aktivitas yang sebelumnya aktif tapi kini tidak
 	for key, start := range activitySessions {
-		// key format: guild:user:activity
-		// cek apakah key milik user+guild ini
-		prefix := guildID + ":" + userID + ":"
+		// key format: user:activity (global)
+		prefix := userID + ":"
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
@@ -202,14 +216,14 @@ func presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 			// akumulasi durasi
 			seconds := int64(time.Since(start).Seconds())
 			delete(activitySessions, key)
-			addActivitySeconds(userID, guildID, activityName, seconds)
+			addActivitySeconds(userID, activityName, seconds)
 			log.Printf("activity off: %s | %s +%ds", userID, activityName, seconds)
 		}
 	}
 
 	// Mulai aktivitas baru yang belum tercatat
 	for name := range activeSet {
-		key := guildID + ":" + userID + ":" + name
+		key := userID + ":" + name
 		if activitySessions[key].IsZero() {
 			activitySessions[key] = time.Now().UTC()
 			log.Printf("activity start: %s | %s", userID, name)
@@ -229,13 +243,13 @@ func addSeconds(userID string, guildID string, seconds int64) {
 	}
 }
 
-// Simpan detik aktivitas ke DB
-func addActivitySeconds(userID, guildID, activityName string, seconds int64) {
+// Simpan detik aktivitas ke DB (global)
+func addActivitySeconds(userID, activityName string, seconds int64) {
 	_, err := db.Exec(`
-	INSERT INTO activity_hours (user_id, guild_id, activity_name, total_seconds)
-	VALUES ($1, $2, $3, $4)
-	ON CONFLICT (user_id, guild_id, activity_name) DO UPDATE SET total_seconds = activity_hours.total_seconds + EXCLUDED.total_seconds`,
-		userID, guildID, activityName, seconds)
+	INSERT INTO activity_hours (user_id, activity_name, total_seconds)
+	VALUES ($1, $2, $3)
+	ON CONFLICT (user_id, activity_name) DO UPDATE SET total_seconds = activity_hours.total_seconds + EXCLUDED.total_seconds`,
+		userID, activityName, seconds)
 	if err != nil {
 		log.Println("DB activity error:", err)
 	}
@@ -300,20 +314,20 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			return
 		}
 		var totalSeconds int64
-		err := db.QueryRow("SELECT total_seconds FROM activity_hours WHERE user_id = $1 AND guild_id = $2 AND activity_name = $3", m.Author.ID, m.GuildID, name).Scan(&totalSeconds)
+		err := db.QueryRow("SELECT total_seconds FROM activity_hours WHERE user_id = $1 AND activity_name = $2", m.Author.ID, name).Scan(&totalSeconds)
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
-		msg := fmt.Sprintf("🎮 %s, membuka %s selama %s", m.Author.Username, name, formatDuration(totalSeconds))
+		msg := fmt.Sprintf("🎮 %s, %s selama %s", m.Author.Username, name, formatDuration(totalSeconds))
 		s.ChannelMessageSend(m.ChannelID, msg)
 		return
 	}
 	if content == "!stats" {
-		// ringkas: total voice + 3 aktivitas teratas
+		// ringkas: total voice (per guild) + 3 aktivitas global teratas
 		var voiceSeconds int64
 		_ = db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&voiceSeconds)
 
-		rows, err := db.Query("SELECT activity_name, total_seconds FROM activity_hours WHERE user_id = $1 AND guild_id = $2 ORDER BY total_seconds DESC LIMIT 3", m.Author.ID, m.GuildID)
+		rows, err := db.Query("SELECT activity_name, total_seconds FROM activity_hours WHERE user_id = $1 ORDER BY total_seconds DESC LIMIT 3", m.Author.ID)
 		if err != nil {
 			log.Println("DB error:", err)
 			s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil statistik.")
@@ -328,7 +342,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				lines = append(lines, fmt.Sprintf("- %s: %s", name, formatDuration(sec)))
 			}
 		}
-		msg := fmt.Sprintf("📊 %s\nVoice: %s\nAktivitas teratas:\n%s", m.Author.Username, formatDuration(voiceSeconds), strings.Join(lines, "\n"))
+		msg := fmt.Sprintf("📊 %s\nVoice (server ini): %s\nAktivitas teratas (global):\n%s", m.Author.Username, formatDuration(voiceSeconds), strings.Join(lines, "\n"))
 		s.ChannelMessageSend(m.ChannelID, msg)
 		return
 	}
