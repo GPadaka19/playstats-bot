@@ -43,6 +43,7 @@ func main() {
 		log.Fatal("DB ping error:", err)
 	}
 	createTable()
+	migrateSchema()
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -68,10 +69,39 @@ func createTable() {
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS voice_hours (
 		user_id TEXT PRIMARY KEY,
-		total_minutes BIGINT NOT NULL DEFAULT 0
+		total_seconds BIGINT NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		log.Fatal("DB create table error:", err)
+	}
+}
+
+// Migrasi dari kolom total_minutes ke total_seconds jika masih ada skema lama
+func migrateSchema() {
+	var exists bool
+	q := `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_name='voice_hours' AND column_name='total_minutes'
+	)`
+	if err := db.QueryRow(q).Scan(&exists); err != nil {
+		log.Println("schema check error:", err)
+		return
+	}
+	if !exists {
+		return
+	}
+
+	if _, err := db.Exec(`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS total_seconds BIGINT NOT NULL DEFAULT 0`); err != nil {
+		log.Println("schema add total_seconds error:", err)
+		return
+	}
+	if _, err := db.Exec(`UPDATE voice_hours SET total_seconds = total_minutes * 60 WHERE total_seconds = 0`); err != nil {
+		log.Println("schema migrate data error:", err)
+		return
+	}
+	if _, err := db.Exec(`ALTER TABLE voice_hours DROP COLUMN IF EXISTS total_minutes`); err != nil {
+		log.Println("schema drop total_minutes error:", err)
+		return
 	}
 }
 
@@ -88,21 +118,22 @@ func voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
     // Leave channel
     if vs.ChannelID == "" && !sessions[userID].IsZero() {
         start := sessions[userID]
-        duration := time.Since(start).Minutes()
+		durationSeconds := int64(time.Since(start).Seconds())
         delete(sessions, userID)
 
-        addMinutes(userID, int64(duration))
-        fmt.Printf("⬅️ Leave: %s, +%.1f minutes\n", userID, duration)
+		addSeconds(userID, durationSeconds)
+		fmt.Printf("⬅️ Leave: %s, +%d seconds\n", userID, durationSeconds)
     }
 }
 
-// Simpan menit ke DB
-func addMinutes(userID string, minutes int64) {
+
+// Simpan detik ke DB
+func addSeconds(userID string, seconds int64) {
 	_, err := db.Exec(`
-	INSERT INTO voice_hours (user_id, total_minutes)
+	INSERT INTO voice_hours (user_id, total_seconds)
 	VALUES ($1, $2)
-	ON CONFLICT (user_id) DO UPDATE SET total_minutes = voice_hours.total_minutes + EXCLUDED.total_minutes`,
-		userID, minutes)
+	ON CONFLICT (user_id) DO UPDATE SET total_seconds = voice_hours.total_seconds + EXCLUDED.total_seconds`,
+		userID, seconds)
 	if err != nil {
 		log.Println("DB error:", err)
 	}
@@ -114,12 +145,11 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 	if m.Content == "!stats" {
-		var total int64
-		err := db.QueryRow("SELECT total_minutes FROM voice_hours WHERE user_id = $1", m.Author.ID).Scan(&total)
+		var totalSeconds int64
+		err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1", m.Author.ID).Scan(&totalSeconds)
 		if err != nil && err != sql.ErrNoRows {
 			log.Println("DB error:", err)
 		}
-        totalSeconds := total * 60
         h := totalSeconds / 3600
         mnt := (totalSeconds % 3600) / 60
         sec := totalSeconds % 60
