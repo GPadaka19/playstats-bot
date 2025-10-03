@@ -156,7 +156,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.Bot {
 		return
 	}
-    if m.Content == "/stats" {
+    if m.Content == "!stats" {
         var totalSeconds int64
         key := m.GuildID + ":" + m.Author.ID
         err := db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1", key).Scan(&totalSeconds)
