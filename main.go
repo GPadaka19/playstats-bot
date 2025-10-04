@@ -327,7 +327,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		var voiceSeconds int64
 		_ = db.QueryRow("SELECT total_seconds FROM voice_hours WHERE user_id = $1 AND guild_id = $2", m.Author.ID, m.GuildID).Scan(&voiceSeconds)
 
-		rows, err := db.Query("SELECT activity_name, total_seconds FROM activity_hours WHERE user_id = $1 ORDER BY total_seconds DESC LIMIT 3", m.Author.ID)
+		rows, err := db.Query("SELECT activity_name, total_seconds FROM activity_hours WHERE user_id = $1 ORDER BY total_seconds DESC LIMIT 5", m.Author.ID)
 		if err != nil {
 			log.Println("DB error:", err)
 			s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil statistik.")
