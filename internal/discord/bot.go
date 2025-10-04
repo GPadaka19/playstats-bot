@@ -157,6 +157,14 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		b.handlePlayCommand(s, m)
 	case content == "!stats":
 		b.handleStatsCommand(s, m)
+	case strings.HasPrefix(content, "!leaderboard"):
+		b.handleLeaderboardCommand(s, m)
+	case strings.HasPrefix(content, "!compare"):
+		b.handleCompareCommand(s, m)
+	case content == "!weekly":
+		b.handleWeeklyCommand(s, m)
+	case content == "!monthly":
+		b.handleMonthlyCommand(s, m)
 	}
 }
 
@@ -231,4 +239,231 @@ func (b *Bot) handleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	msg := fmt.Sprintf("📊 %s\nVoice (server ini): %s\nAktivitas teratas (global):\n%s", 
 		m.Author.Username, utils.FormatDuration(voiceSeconds), strings.Join(lines, "\n"))
 	s.ChannelMessageSend(m.ChannelID, msg)
+}
+
+// handleLeaderboardCommand handles the !leaderboard command
+func (b *Bot) handleLeaderboardCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	content := strings.TrimSpace(m.Content)
+	parts := strings.Fields(content)
+	
+	if len(parts) < 2 {
+		s.ChannelMessageSend(m.ChannelID, "Format: !leaderboard voice | !leaderboard play <nama game>")
+		return
+	}
+	
+	switch parts[1] {
+	case "voice":
+		b.handleVoiceLeaderboard(s, m)
+	case "play":
+		if len(parts) < 3 {
+			s.ChannelMessageSend(m.ChannelID, "Format: !leaderboard play <nama game>")
+			return
+		}
+		gameName := strings.Join(parts[2:], " ")
+		b.handleActivityLeaderboard(s, m, gameName)
+	default:
+		s.ChannelMessageSend(m.ChannelID, "Format: !leaderboard voice | !leaderboard play <nama game>")
+	}
+}
+
+// handleVoiceLeaderboard handles voice leaderboard
+func (b *Bot) handleVoiceLeaderboard(s *discordgo.Session, m *discordgo.MessageCreate) {
+	entries, err := b.repository.GetVoiceLeaderboard(m.GuildID, 10)
+	if err != nil {
+		log.Printf("Error getting voice leaderboard: %v", err)
+		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil leaderboard voice.")
+		return
+	}
+	
+	if len(entries) == 0 {
+		s.ChannelMessageSend(m.ChannelID, "Belum ada data voice untuk leaderboard.")
+		return
+	}
+	
+	var lines []string
+	for _, entry := range entries {
+		userMention := utils.FormatUserMention(entry.UserID)
+		line := utils.FormatLeaderboardEntry(entry.Rank, userMention, utils.FormatDuration(entry.TotalSeconds))
+		lines = append(lines, line)
+	}
+	
+	msg := fmt.Sprintf("🏆 **Voice Leaderboard** (Server ini)\n%s", strings.Join(lines, "\n"))
+	s.ChannelMessageSend(m.ChannelID, msg)
+}
+
+// handleActivityLeaderboard handles activity leaderboard
+func (b *Bot) handleActivityLeaderboard(s *discordgo.Session, m *discordgo.MessageCreate, activityName string) {
+	entries, err := b.repository.GetActivityLeaderboard(activityName, 10)
+	if err != nil {
+		log.Printf("Error getting activity leaderboard: %v", err)
+		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil leaderboard aktivitas.")
+		return
+	}
+	
+	if len(entries) == 0 {
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Belum ada data untuk game '%s'.", activityName))
+		return
+	}
+	
+	var lines []string
+	for _, entry := range entries {
+		userMention := utils.FormatUserMention(entry.UserID)
+		line := utils.FormatLeaderboardEntry(entry.Rank, userMention, utils.FormatDuration(entry.TotalSeconds))
+		lines = append(lines, line)
+	}
+	
+	msg := fmt.Sprintf("🎮 **Leaderboard %s** (Global)\n%s", activityName, strings.Join(lines, "\n"))
+	s.ChannelMessageSend(m.ChannelID, msg)
+}
+
+// handleCompareCommand handles the !compare command
+func (b *Bot) handleCompareCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	content := strings.TrimSpace(m.Content)
+	parts := strings.Fields(content)
+	
+	if len(parts) < 3 {
+		s.ChannelMessageSend(m.ChannelID, "Format: !compare @user1 @user2")
+		return
+	}
+	
+	user1Mention := parts[1]
+	user2Mention := parts[2]
+	
+	if !utils.IsUserMention(user1Mention) || !utils.IsUserMention(user2Mention) {
+		s.ChannelMessageSend(m.ChannelID, "Format: !compare @user1 @user2")
+		return
+	}
+	
+	userID1 := utils.ExtractUserIDFromMention(user1Mention)
+	userID2 := utils.ExtractUserIDFromMention(user2Mention)
+	
+	comparisons, err := b.repository.GetUserComparison(userID1, userID2, m.GuildID)
+	if err != nil {
+		log.Printf("Error getting user comparison: %v", err)
+		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil data perbandingan.")
+		return
+	}
+	
+	if len(comparisons) != 2 {
+		s.ChannelMessageSend(m.ChannelID, "Tidak dapat menemukan data untuk salah satu atau kedua user.")
+		return
+	}
+	
+	user1 := comparisons[0]
+	user2 := comparisons[1]
+	
+	msg := fmt.Sprintf("⚖️ **Perbandingan User**\n\n"+
+		"**%s**\n"+
+		"🔊 Voice: %s\n"+
+		"🎮 Top Games:\n%s\n\n"+
+		"**%s**\n"+
+		"🔊 Voice: %s\n"+
+		"🎮 Top Games:\n%s",
+		user1Mention, utils.FormatDuration(user1.VoiceSeconds), b.formatTopActivities(user1.TopActivities),
+		user2Mention, utils.FormatDuration(user2.VoiceSeconds), b.formatTopActivities(user2.TopActivities))
+	
+	s.ChannelMessageSend(m.ChannelID, msg)
+}
+
+// handleWeeklyCommand handles the !weekly command
+func (b *Bot) handleWeeklyCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Get current week start (Monday)
+	now := time.Now()
+	weekStart := now.AddDate(0, 0, -int(now.Weekday())+1).Format("2006-01-02")
+	
+	stats, err := b.repository.GetWeeklyReport(m.Author.ID, m.GuildID, weekStart)
+	if err != nil {
+		log.Printf("Error getting weekly report: %v", err)
+		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil laporan mingguan.")
+		return
+	}
+	
+	if len(stats) == 0 {
+		s.ChannelMessageSend(m.ChannelID, "Belum ada data untuk minggu ini.")
+		return
+	}
+	
+	var voiceTotal int64
+	var activityLines []string
+	
+	for _, stat := range stats {
+		if stat.ActivityName == "" {
+			voiceTotal += stat.VoiceSeconds
+		} else {
+			activityLines = append(activityLines, fmt.Sprintf("- %s: %s", 
+				stat.ActivityName, utils.FormatDuration(stat.ActivitySeconds)))
+		}
+	}
+	
+	msg := fmt.Sprintf("📅 **Laporan Mingguan** (%s)\n\n"+
+		"🔊 Total Voice: %s\n"+
+		"🎮 Aktivitas:\n%s",
+		weekStart, utils.FormatDuration(voiceTotal), strings.Join(activityLines, "\n"))
+	
+	s.ChannelMessageSend(m.ChannelID, msg)
+}
+
+// handleMonthlyCommand handles the !monthly command
+func (b *Bot) handleMonthlyCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	stats, err := b.repository.GetMonthlyReport(m.Author.ID, m.GuildID)
+	if err != nil {
+		log.Printf("Error getting monthly report: %v", err)
+		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil laporan bulanan.")
+		return
+	}
+	
+	if len(stats) == 0 {
+		s.ChannelMessageSend(m.ChannelID, "Belum ada data untuk 4 minggu terakhir.")
+		return
+	}
+	
+	// Group by week
+	weekTotals := make(map[string]int64)
+	weekActivities := make(map[string]map[string]int64)
+	
+	for _, stat := range stats {
+		weekStart := stat.WeekStart
+		if stat.ActivityName == "" {
+			weekTotals[weekStart] += stat.VoiceSeconds
+		} else {
+			if weekActivities[weekStart] == nil {
+				weekActivities[weekStart] = make(map[string]int64)
+			}
+			weekActivities[weekStart][stat.ActivityName] += stat.ActivitySeconds
+		}
+	}
+	
+	var lines []string
+	for weekStart, voiceTotal := range weekTotals {
+		line := fmt.Sprintf("**%s**: %s", weekStart, utils.FormatDuration(voiceTotal))
+		if activities, exists := weekActivities[weekStart]; exists {
+			var activityLines []string
+			for activity, seconds := range activities {
+				activityLines = append(activityLines, fmt.Sprintf("  - %s: %s", 
+					activity, utils.FormatDuration(seconds)))
+			}
+			if len(activityLines) > 0 {
+				line += "\n" + strings.Join(activityLines, "\n")
+			}
+		}
+		lines = append(lines, line)
+	}
+	
+	msg := fmt.Sprintf("📊 **Laporan Bulanan** (4 minggu terakhir)\n\n%s", strings.Join(lines, "\n"))
+	s.ChannelMessageSend(m.ChannelID, msg)
+}
+
+// formatTopActivities formats top activities for display
+func (b *Bot) formatTopActivities(activities []database.ActivityHours) string {
+	if len(activities) == 0 {
+		return "  (belum ada data)"
+	}
+	
+	var lines []string
+	for _, activity := range activities {
+		lines = append(lines, fmt.Sprintf("  - %s: %s", 
+			activity.ActivityName, utils.FormatDuration(activity.TotalSeconds)))
+	}
+	
+	return strings.Join(lines, "\n")
 }

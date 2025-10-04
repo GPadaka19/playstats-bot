@@ -128,6 +128,189 @@ func (r *Repository) GetVoiceChannelHours(userID, guildID string) ([]VoiceChanne
 	return channelHours, nil
 }
 
+// AddDailyStats adds daily statistics
+func (r *Repository) AddDailyStats(date, userID, guildID string, voiceSeconds, activitySeconds int64, activityName string) error {
+	_, err := r.db.conn.Exec(`
+		INSERT INTO daily_stats (date, user_id, guild_id, voice_seconds, activity_seconds, activity_name)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (date, user_id, guild_id, activity_name) 
+		DO UPDATE SET 
+			voice_seconds = daily_stats.voice_seconds + EXCLUDED.voice_seconds,
+			activity_seconds = daily_stats.activity_seconds + EXCLUDED.activity_seconds`,
+		date, userID, guildID, voiceSeconds, activitySeconds, activityName)
+	if err != nil {
+		return fmt.Errorf("failed to add daily stats: %w", err)
+	}
+	return nil
+}
+
+// AddWeeklyStats adds weekly statistics
+func (r *Repository) AddWeeklyStats(weekStart, userID, guildID string, voiceSeconds, activitySeconds int64, activityName string) error {
+	_, err := r.db.conn.Exec(`
+		INSERT INTO weekly_stats (week_start, user_id, guild_id, voice_seconds, activity_seconds, activity_name)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (week_start, user_id, guild_id, activity_name) 
+		DO UPDATE SET 
+			voice_seconds = weekly_stats.voice_seconds + EXCLUDED.voice_seconds,
+			activity_seconds = weekly_stats.activity_seconds + EXCLUDED.activity_seconds`,
+		weekStart, userID, guildID, voiceSeconds, activitySeconds, activityName)
+	if err != nil {
+		return fmt.Errorf("failed to add weekly stats: %w", err)
+	}
+	return nil
+}
+
+// GetVoiceLeaderboard gets voice leaderboard for a guild
+func (r *Repository) GetVoiceLeaderboard(guildID string, limit int) ([]LeaderboardEntry, error) {
+	rows, err := r.db.conn.Query(`
+		SELECT user_id, total_seconds 
+		FROM voice_hours 
+		WHERE guild_id = $1 
+		ORDER BY total_seconds DESC 
+		LIMIT $2`,
+		guildID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voice leaderboard: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []LeaderboardEntry
+	rank := 1
+	for rows.Next() {
+		var entry LeaderboardEntry
+		if err := rows.Scan(&entry.UserID, &entry.TotalSeconds); err != nil {
+			log.Printf("Error scanning leaderboard row: %v", err)
+			continue
+		}
+		entry.Rank = rank
+		entries = append(entries, entry)
+		rank++
+	}
+
+	return entries, nil
+}
+
+// GetActivityLeaderboard gets activity leaderboard for a specific activity
+func (r *Repository) GetActivityLeaderboard(activityName string, limit int) ([]LeaderboardEntry, error) {
+	rows, err := r.db.conn.Query(`
+		SELECT user_id, total_seconds 
+		FROM activity_hours 
+		WHERE activity_name = $1 
+		ORDER BY total_seconds DESC 
+		LIMIT $2`,
+		activityName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get activity leaderboard: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []LeaderboardEntry
+	rank := 1
+	for rows.Next() {
+		var entry LeaderboardEntry
+		if err := rows.Scan(&entry.UserID, &entry.TotalSeconds); err != nil {
+			log.Printf("Error scanning activity leaderboard row: %v", err)
+			continue
+		}
+		entry.Rank = rank
+		entries = append(entries, entry)
+		rank++
+	}
+
+	return entries, nil
+}
+
+// GetUserComparison gets comparison data for two users
+func (r *Repository) GetUserComparison(userID1, userID2, guildID string) ([]UserComparison, error) {
+	var comparisons []UserComparison
+	
+	// Get data for both users
+	userIDs := []string{userID1, userID2}
+	for _, userID := range userIDs {
+		comparison := UserComparison{UserID: userID}
+		
+		// Get voice hours for this guild
+		voiceSeconds, err := r.GetVoiceHours(userID, guildID)
+		if err != nil {
+			log.Printf("Error getting voice hours for user %s: %v", userID, err)
+		}
+		comparison.VoiceSeconds = voiceSeconds
+		
+		// Get top activities
+		activities, err := r.GetTopActivities(userID, 3)
+		if err != nil {
+			log.Printf("Error getting top activities for user %s: %v", userID, err)
+		}
+		comparison.TopActivities = activities
+		
+		// Get channel hours
+		channelHours, err := r.GetVoiceChannelHours(userID, guildID)
+		if err != nil {
+			log.Printf("Error getting channel hours for user %s: %v", userID, err)
+		}
+		comparison.ChannelHours = channelHours
+		
+		comparisons = append(comparisons, comparison)
+	}
+	
+	return comparisons, nil
+}
+
+// GetWeeklyReport gets weekly report for a user
+func (r *Repository) GetWeeklyReport(userID, guildID string, weekStart string) ([]WeeklyStats, error) {
+	rows, err := r.db.conn.Query(`
+		SELECT week_start, user_id, guild_id, voice_seconds, activity_seconds, activity_name
+		FROM weekly_stats 
+		WHERE user_id = $1 AND guild_id = $2 AND week_start = $3
+		ORDER BY voice_seconds DESC, activity_seconds DESC`,
+		userID, guildID, weekStart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get weekly report: %w", err)
+	}
+	defer rows.Close()
+
+	var stats []WeeklyStats
+	for rows.Next() {
+		var stat WeeklyStats
+		if err := rows.Scan(&stat.WeekStart, &stat.UserID, &stat.GuildID, 
+			&stat.VoiceSeconds, &stat.ActivitySeconds, &stat.ActivityName); err != nil {
+			log.Printf("Error scanning weekly stats row: %v", err)
+			continue
+		}
+		stats = append(stats, stat)
+	}
+
+	return stats, nil
+}
+
+// GetMonthlyReport gets monthly report for a user (last 4 weeks)
+func (r *Repository) GetMonthlyReport(userID, guildID string) ([]WeeklyStats, error) {
+	rows, err := r.db.conn.Query(`
+		SELECT week_start, user_id, guild_id, voice_seconds, activity_seconds, activity_name
+		FROM weekly_stats 
+		WHERE user_id = $1 AND guild_id = $2 
+		AND week_start >= CURRENT_DATE - INTERVAL '28 days'
+		ORDER BY week_start DESC`,
+		userID, guildID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get monthly report: %w", err)
+	}
+	defer rows.Close()
+
+	var stats []WeeklyStats
+	for rows.Next() {
+		var stat WeeklyStats
+		if err := rows.Scan(&stat.WeekStart, &stat.UserID, &stat.GuildID, 
+			&stat.VoiceSeconds, &stat.ActivitySeconds, &stat.ActivityName); err != nil {
+			log.Printf("Error scanning monthly stats row: %v", err)
+			continue
+		}
+		stats = append(stats, stat)
+	}
+
+	return stats, nil
+}
+
 // ActivityHours represents activity hours data
 type ActivityHours struct {
 	UserID       string
@@ -141,4 +324,41 @@ type VoiceChannelHours struct {
 	GuildID      string
 	ChannelID    string
 	TotalSeconds int64
+}
+
+// DailyStats represents daily statistics data
+type DailyStats struct {
+	Date            string
+	UserID          string
+	GuildID         string
+	VoiceSeconds    int64
+	ActivitySeconds int64
+	ActivityName    string
+}
+
+// WeeklyStats represents weekly statistics data
+type WeeklyStats struct {
+	WeekStart       string
+	UserID          string
+	GuildID         string
+	VoiceSeconds    int64
+	ActivitySeconds int64
+	ActivityName    string
+}
+
+// LeaderboardEntry represents a leaderboard entry
+type LeaderboardEntry struct {
+	UserID       string
+	Username     string
+	TotalSeconds int64
+	Rank         int
+}
+
+// UserComparison represents user comparison data
+type UserComparison struct {
+	UserID         string
+	Username       string
+	VoiceSeconds   int64
+	TopActivities  []ActivityHours
+	ChannelHours   []VoiceChannelHours
 }

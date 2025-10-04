@@ -70,6 +70,24 @@ func (db *DB) createTables() error {
 			total_seconds BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, guild_id, channel_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS daily_stats (
+			date DATE NOT NULL,
+			user_id TEXT NOT NULL,
+			guild_id TEXT NOT NULL,
+			voice_seconds BIGINT NOT NULL DEFAULT 0,
+			activity_seconds BIGINT NOT NULL DEFAULT 0,
+			activity_name TEXT DEFAULT '',
+			PRIMARY KEY (date, user_id, guild_id, activity_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS weekly_stats (
+			week_start DATE NOT NULL,
+			user_id TEXT NOT NULL,
+			guild_id TEXT NOT NULL,
+			voice_seconds BIGINT NOT NULL DEFAULT 0,
+			activity_seconds BIGINT NOT NULL DEFAULT 0,
+			activity_name TEXT DEFAULT '',
+			PRIMARY KEY (week_start, user_id, guild_id, activity_name)
+		)`,
 	}
 
 	for _, query := range queries {
