@@ -357,15 +357,12 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	}
 	defer stream.Close()
 
-	// Use ffmpeg to convert directly to Opus format
+	// Use ffmpeg to convert to PCM first, then we'll handle Opus encoding
 	cmd := exec.Command("ffmpeg",
 		"-i", "pipe:0",           // input from stdin
-		"-f", "opus",             // output Opus format
+		"-f", "s16le",            // raw PCM format
 		"-ar", "48000",           // sample rate 48kHz
 		"-ac", "2",               // stereo
-		"-b:a", "128k",           // bitrate
-		"-application", "audio",  // audio application
-		"-frame_duration", "20",  // 20ms frames
 		"-loglevel", "error",     // reduce ffmpeg output
 		"pipe:1",                 // output to stdout
 	)
@@ -385,13 +382,16 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	defer vc.Speaking(false)
 
 	fmt.Printf("🔊 Starting audio playback...\n")
+	fmt.Printf("📊 Stream info: format=%s, itag=%d\n", format.MimeType, format.ItagNo)
 	
-	// Read Opus data and send to Discord
-	buffer := make([]byte, 4096) // buffer for Opus data
+	// Read PCM data and send to Discord
+	buffer := make([]byte, 960*4*2) // 960 frames * 4 bytes * 2 channels
+	frameCount := 0
+	
 	for {
 		n, err := stdout.Read(buffer)
 		if err == io.EOF {
-			fmt.Printf("✅ Audio stream finished\n")
+			fmt.Printf("✅ Audio stream finished (processed %d frames)\n", frameCount)
 			break
 		}
 		if err != nil {
@@ -399,13 +399,18 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 			break
 		}
 		if n > 0 {
-			// Send Opus data to Discord
+			frameCount++
+			
+			// Send PCM data directly to Discord (it will handle Opus encoding)
 			select {
 			case vc.OpusSend <- buffer[:n]:
 			case <-time.After(5 * time.Second):
 				log.Printf("⚠️ Timeout sending audio data")
 				return fmt.Errorf("timeout sending audio")
 			}
+			
+			// Add small delay to prevent overwhelming Discord
+			time.Sleep(20 * time.Millisecond)
 		}
 	}
 

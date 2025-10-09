@@ -71,13 +71,29 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpd
 	guildID := vs.GuildID
 	key := guildID + ":" + userID
 
+	// Get user info
+	user, err := s.User(userID)
+	username := userID
+	if err == nil && user != nil {
+		username = user.Username
+	}
+
 	// Join channel
 	if vs.ChannelID != "" && b.sessions[key].Start.IsZero() {
 		b.sessions[key] = models.VoiceSession{
 			Start:     time.Now().UTC(),
 			ChannelID: vs.ChannelID,
 		}
-		fmt.Printf("➡️ Join: %s %s channel=%s\n", userID, b.sessions[key].Start.In(b.tzUTC7), vs.ChannelID)
+		
+		// Get channel info
+		channel, err := s.Channel(vs.ChannelID)
+		channelName := vs.ChannelID
+		if err == nil && channel != nil {
+			channelName = channel.Name
+		}
+		
+		fmt.Printf("➡️ Join: %s (%s) %s channel=%s (%s)\n", 
+			username, userID, b.sessions[key].Start.In(b.tzUTC7), vs.ChannelID, channelName)
 	}
 
 	// Leave channel
@@ -87,13 +103,21 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpd
 		durationSeconds := int64(time.Since(start).Seconds())
 		delete(b.sessions, key)
 
+		// Get channel info for leave message
+		channel, err := s.Channel(channelID)
+		channelName := channelID
+		if err == nil && channel != nil {
+			channelName = channel.Name
+		}
+
 		if err := b.repository.AddVoiceSeconds(userID, guildID, durationSeconds); err != nil {
 			log.Printf("Error adding voice seconds: %v", err)
 		}
 		if err := b.repository.AddChannelSeconds(userID, guildID, channelID, durationSeconds); err != nil {
 			log.Printf("Error adding channel seconds: %v", err)
 		}
-		fmt.Printf("⬅️ Leave: %s, +%d seconds channel=%s\n", userID, durationSeconds, channelID)
+		fmt.Printf("⬅️ Leave: %s (%s), +%d seconds channel=%s (%s)\n", 
+			username, userID, durationSeconds, channelID, channelName)
 	}
 }
 
@@ -101,7 +125,15 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpd
 func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 	guildID := p.GuildID
 	userID := p.User.ID
-	log.Printf("presenceUpdate: guild=%s user=%s activities=%d", guildID, userID, len(p.Activities))
+	
+	// Get user info
+	user, err := s.User(userID)
+	username := userID
+	if err == nil && user != nil {
+		username = user.Username
+	}
+	
+	log.Printf("presenceUpdate: guild=%s user=%s (%s) activities=%d", guildID, userID, username, len(p.Activities))
 
 	// Collect relevant activity names (Game/Application)
 	activeSet := make(map[string]bool)
@@ -109,7 +141,7 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 		name := act.Name
 		if name != "" {
 			activeSet[name] = true
-			log.Printf("activity on: %s | %s", userID, name)
+			log.Printf("activity on: %s (%s) | %s", username, userID, name)
 		}
 	}
 
@@ -128,7 +160,7 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 			if err := b.repository.AddActivitySeconds(userID, activityName, seconds); err != nil {
 				log.Printf("Error adding activity seconds: %v", err)
 			}
-			log.Printf("activity off: %s | %s +%ds", userID, activityName, seconds)
+			log.Printf("activity off: %s (%s) | %s +%ds", username, userID, activityName, seconds)
 		}
 	}
 
@@ -137,7 +169,7 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 		key := userID + ":" + name
 		if b.activitySessions[key].IsZero() {
 			b.activitySessions[key] = time.Now().UTC()
-			log.Printf("activity start: %s | %s", userID, name)
+			log.Printf("activity start: %s (%s) | %s", username, userID, name)
 		}
 	}
 }
