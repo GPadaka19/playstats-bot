@@ -149,16 +149,18 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	content := strings.TrimSpace(m.Content)
-	botUserID := s.State.User.ID // ambil ID bot sendiri
+	botUserID := s.State.User.ID // ambil ID bot
 	isMentioned := strings.Contains(content, "<@"+botUserID+">") || strings.Contains(content, "<@!"+botUserID+">")
-
 
 	switch {
 	case content == "!voice" || strings.HasPrefix(content, "!voicechan"):
 		b.handleVoiceCommand(s, m)
 	case strings.HasPrefix(content, "!play"):
 		b.handlePlayCommand(s, m)
-	case content == "!stats" || isMentioned:
+	case isMentioned:
+		// Handle bot mention commands (music or stats)
+		b.handleMentionCommand(s, m)
+	case content == "!stats":
 		b.handleStatsCommand(s, m)
 	case strings.HasPrefix(content, "!leaderboard"):
 		b.handleLeaderboardCommand(s, m)
@@ -169,6 +171,73 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	case content == "!monthly":
 		b.handleMonthlyCommand(s, m)
 	}
+}
+
+// handleMentionCommand handles bot mention commands
+func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	content := strings.TrimSpace(m.Content)
+	
+	// Remove bot mention from content to get the actual command
+	botUserID := s.State.User.ID
+	content = strings.ReplaceAll(content, "<@"+botUserID+">", "")
+	content = strings.ReplaceAll(content, "<@!"+botUserID+">", "")
+	content = strings.TrimSpace(content)
+	
+	// Check if it's a music-related command or just stats
+	if content == "" || strings.ToLower(content) == "stats" {
+		// Default to stats if no specific command or "stats"
+		b.handleStatsCommand(s, m)
+		return
+	}
+	
+	// Check if it's a music command
+	musicCommands := []string{"skip", "stop", "queue", "pause", "resume", "loop", "volume"}
+	parts := strings.Fields(content)
+	if len(parts) > 0 {
+		firstWord := strings.ToLower(parts[0])
+		for _, cmd := range musicCommands {
+			if firstWord == cmd {
+				b.handleMusicCommand(s, m)
+				return
+			}
+		}
+	}
+	
+	// If it contains URL patterns or seems like a search query, treat as music
+	if b.isMusicQuery(content) {
+		b.handleMusicCommand(s, m)
+		return
+	}
+	
+	// Default to stats for anything else
+	b.handleStatsCommand(s, m)
+}
+
+// isMusicQuery checks if the content looks like a music query
+func (b *Bot) isMusicQuery(content string) bool {
+	// Check for YouTube URLs
+	youtubePatterns := []string{
+		"youtube.com",
+		"youtu.be",
+	}
+	
+	// Check for Spotify URLs
+	spotifyPatterns := []string{
+		"spotify.com",
+	}
+	
+	content = strings.ToLower(content)
+	
+	// Check for URL patterns
+	for _, pattern := range append(youtubePatterns, spotifyPatterns...) {
+		if strings.Contains(content, pattern) {
+			return true
+		}
+	}
+	
+	// If it's more than 3 words and doesn't look like a command, treat as search query
+	words := strings.Fields(content)
+	return len(words) > 3
 }
 
 // handleVoiceCommand handles the !voice command

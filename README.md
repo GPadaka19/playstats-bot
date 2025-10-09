@@ -20,6 +20,17 @@ Bot Discord untuk melacak statistik voice dan aktivitas gaming.
 - `!weekly` - Laporan mingguan
 - `!monthly` - Laporan 4 minggu terakhir
 
+### 🎵 Musik (Bot Mention)
+- `@bot [judul lagu/YouTube URL]` - Memutar musik
+- `@bot skip` - Melompati lagu saat ini
+- `@bot stop` - Menghentikan musik dan membersihkan queue
+- `@bot queue` - Menampilkan daftar lagu dalam queue
+- `@bot pause` - Menjeda musik
+- `@bot resume` - Melanjutkan musik
+- `@bot loop` - Mengaktifkan/menonaktifkan mode loop
+- `@bot volume [0-100]` - Mengatur volume
+- `@bot` atau `@bot stats` - Menampilkan statistik (default)
+
 
 ## 🎯 Fitur Otomatis
 Bot secara otomatis melacak:
@@ -50,5 +61,19 @@ Bot menyimpan data di tabel:
    - Send Messages
    - Read Message History
    - View Channel
-   - Connect (untuk voice tracking)
+   - Connect (untuk voice tracking dan musik)
+   - Speak (untuk musik)
    - View Server Members (untuk presence tracking)
+
+## 🎵 Fitur Musik
+
+Bot sekarang mendukung pemutaran musik dengan fitur:
+- **YouTube Integration**: Memutar musik dari YouTube URL
+- **Queue System**: Sistem antrian lagu per server
+- **Voice Control**: Kontrol musik melalui voice channel
+- **Rich Embeds**: Tampilan informasi lagu yang menarik
+
+### Catatan Implementasi
+- Fitur musik menggunakan mention bot (`@bot`) untuk membedakan dari command statistik
+- Audio streaming memerlukan implementasi tambahan untuk actual playback
+- Spotify integration memerlukan API key dan implementasi lebih lanjut
