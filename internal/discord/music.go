@@ -329,13 +329,18 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 		return fmt.Errorf("gagal ambil stream YouTube: %v", err)
 	}
 
-	// Gunakan ffmpeg untuk ubah jadi raw PCM s16le (format yang didukung Discord)
 	cmd := exec.Command("ffmpeg",
-		"-i", "pipe:0", // input dari stdin
-		"-f", "s16le",  // raw PCM
-		"-ar", "48000", // sample rate
-		"-ac", "2",     // stereo
-		"pipe:1",       // output ke stdout
+    "-i", "pipe:0",  // input dari stdin
+    "-f", "s16le",   // raw PCM
+    "-ar", "48000",  // sample rate
+    "-ac", "2",      // stereo
+    "-acodec", "libopus", // encode ke Opus
+    "-application", "audio",
+    "-frame_duration", "20",
+    "-compression_level", "10",
+    "-b:a", "128k",
+    "-f", "opus",    // output format
+    "pipe:1",
 	)
 	cmd.Stdin = stream
 	stdout, err := cmd.StdoutPipe()
