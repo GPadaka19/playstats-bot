@@ -149,13 +149,16 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	content := strings.TrimSpace(m.Content)
+	botUserID := s.State.User.ID // ambil ID bot sendiri
+	isMentioned := strings.Contains(content, "<@"+botUserID+">") || strings.Contains(content, "<@!"+botUserID+">")
+
 
 	switch {
 	case content == "!voice" || strings.HasPrefix(content, "!voicechan"):
 		b.handleVoiceCommand(s, m)
 	case strings.HasPrefix(content, "!play"):
 		b.handlePlayCommand(s, m)
-	case content == "!stats":
+	case content == "!stats" || isMentioned:
 		b.handleStatsCommand(s, m)
 	case strings.HasPrefix(content, "!leaderboard"):
 		b.handleLeaderboardCommand(s, m)
