@@ -100,12 +100,16 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 
 // handlePlayMusic handles playing music
 func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, query, channelID string) {
+	// Log the query
+	fmt.Printf("🎵 Music query from %s: %s\n", m.Author.Username, query)
+	
 	// Show loading message
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Mencari lagu...")
 	
 	// Extract or search for music
 	track, err := b.extractMusicInfo(query)
 	if err != nil {
+		fmt.Printf("❌ Music extraction error: %v\n", err)
 		s.ChannelMessageEdit(m.ChannelID, loadingMsg.ID, "❌ Gagal mengambil informasi lagu: "+err.Error())
 		return
 	}
@@ -165,17 +169,22 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 
 // extractMusicInfo extracts music information from query/URL
 func (b *Bot) extractMusicInfo(query string) (*MusicTrack, error) {
+	fmt.Printf("🔍 Extracting music info for: %s\n", query)
+	
 	// Check if it's a YouTube URL
 	if b.isYouTubeURL(query) {
+		fmt.Printf("📺 Detected YouTube URL\n")
 		return b.extractYouTubeInfo(query)
 	}
 	
 	// Check if it's a Spotify URL (we'll need to convert to YouTube)
 	if b.isSpotifyURL(query) {
+		fmt.Printf("🎧 Detected Spotify URL\n")
 		return b.extractSpotifyInfo(query)
 	}
 	
 	// Treat as search query
+	fmt.Printf("🔍 Treating as search query\n")
 	return b.searchYouTube(query)
 }
 
@@ -204,25 +213,48 @@ func (b *Bot) isSpotifyURL(url string) bool {
 
 // extractYouTubeInfo extracts information from YouTube URL
 func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
+	// Log the URL being processed
+	fmt.Printf("🔍 Processing YouTube URL: %s\n", url)
+	
+	// Try to get video info
 	video, err := ytClient.GetVideo(url)
 	if err != nil {
-		return nil, fmt.Errorf("gagal mengambil video YouTube: %v", err)
+		fmt.Printf("❌ YouTube API Error: %v\n", err)
+		
+		// Try alternative approach - create a basic track with URL
+		fmt.Printf("🔄 Trying fallback approach...\n")
+		return &MusicTrack{
+			Title:     "YouTube Video (Info unavailable)",
+			URL:       url,
+			Duration:  time.Duration(0), // Unknown duration
+			Thumbnail: "",
+		}, nil
 	}
+	
+	fmt.Printf("✅ Successfully got video info: %s\n", video.Title)
 	
 	// Get best audio format
 	formats := video.Formats.WithAudioChannels()
 	if len(formats) == 0 {
-		return nil, fmt.Errorf("tidak ada format audio yang tersedia")
+		fmt.Printf("⚠️ No audio formats available, but continuing...\n")
 	}
 	
-	// Use the first available audio format
-	_ = formats[0] // format available for future use
+	// Use the first available audio format if exists
+	if len(formats) > 0 {
+		_ = formats[0] // format available for future use
+	}
+	
+	// Get thumbnail
+	thumbnail := ""
+	if len(video.Thumbnails) > 0 {
+		thumbnail = video.Thumbnails[0].URL
+	}
 	
 	return &MusicTrack{
 		Title:     video.Title,
 		URL:       url,
 		Duration:  video.Duration,
-		Thumbnail: video.Thumbnails[0].URL,
+		Thumbnail: thumbnail,
 	}, nil
 }
 
