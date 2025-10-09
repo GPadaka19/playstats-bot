@@ -13,8 +13,12 @@
     FROM alpine:3.18
     WORKDIR /app
     
-    # Install ffmpeg untuk playback musik
-    RUN apk add --no-cache ffmpeg
+    # Install dependencies untuk audio processing
+    RUN apk add --no-cache \
+        ffmpeg \
+        python3 \
+        py3-pip \
+        && pip3 install yt-dlp
     
     # Copy hasil build dari stage sebelumnya
     COPY --from=builder /app/bot .

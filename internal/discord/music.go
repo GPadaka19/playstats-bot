@@ -194,13 +194,10 @@ func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
 	video, err := ytClient.GetVideo(url)
 	if err != nil {
 		fmt.Printf("❌ YouTube API Error: %v\n", err)
-		fmt.Println("🔄 Trying fallback approach...")
-		return &MusicTrack{
-			Title:     "YouTube Video (Info unavailable)",
-			URL:       url,
-			Duration:  0,
-			Thumbnail: "",
-		}, nil
+		
+		// Try yt-dlp as fallback
+		fmt.Printf("🔄 Trying yt-dlp fallback...\n")
+		return b.extractWithYtDlp(url)
 	}
 
 	fmt.Printf("✅ Successfully got video info: %s\n", video.Title)
@@ -220,6 +217,28 @@ func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
 		URL:       url,
 		Duration:  video.Duration,
 		Thumbnail: thumbnail,
+	}, nil
+}
+
+// extractWithYtDlp extracts video info using yt-dlp as fallback
+func (b *Bot) extractWithYtDlp(url string) (*MusicTrack, error) {
+	fmt.Printf("🔧 Using yt-dlp fallback for: %s\n", url)
+	
+	// Try to get title using yt-dlp
+	cmd := exec.Command("yt-dlp", "--get-title", url)
+	titleBytes, err := cmd.Output()
+	title := "YouTube Video"
+	if err == nil && len(titleBytes) > 0 {
+		title = strings.TrimSpace(string(titleBytes))
+	}
+	
+	fmt.Printf("✅ yt-dlp extracted title: %s\n", title)
+	
+	return &MusicTrack{
+		Title:     title,
+		URL:       url,
+		Duration:  0, // Unknown duration
+		Thumbnail: "",
 	}, nil
 }
 

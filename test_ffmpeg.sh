@@ -10,7 +10,22 @@ echo "📺 Testing with URL: $URL"
 
 # Test 1: Check if yt-dlp can extract audio URL
 echo "1️⃣ Testing yt-dlp audio extraction..."
-yt-dlp -f "bestaudio[ext=m4a]" --get-url "$URL" 2>/dev/null
+
+# Try different yt-dlp locations
+YTDLP_CMD=""
+if command -v yt-dlp &> /dev/null; then
+    YTDLP_CMD="yt-dlp"
+elif command -v ~/.local/bin/yt-dlp &> /dev/null; then
+    YTDLP_CMD="~/.local/bin/yt-dlp"
+elif [ -f ~/.local/bin/yt-dlp ]; then
+    YTDLP_CMD="~/.local/bin/yt-dlp"
+else
+    echo "❌ yt-dlp not found in PATH or ~/.local/bin/"
+    exit 1
+fi
+
+echo "📡 Using yt-dlp: $YTDLP_CMD"
+$YTDLP_CMD -f "bestaudio[ext=m4a]" --get-url "$URL" 2>/dev/null
 
 if [ $? -eq 0 ]; then
     echo "✅ yt-dlp can extract audio URL"
@@ -20,7 +35,7 @@ fi
 
 # Test 2: Check ffmpeg with direct audio stream
 echo "2️⃣ Testing ffmpeg with audio stream..."
-AUDIO_URL=$(yt-dlp -f "bestaudio[ext=m4a]" --get-url "$URL" 2>/dev/null)
+AUDIO_URL=$($YTDLP_CMD -f "bestaudio[ext=m4a]" --get-url "$URL" 2>/dev/null)
 
 if [ ! -z "$AUDIO_URL" ]; then
     echo "📡 Audio URL: $AUDIO_URL"
