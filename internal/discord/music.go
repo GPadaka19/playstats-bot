@@ -378,12 +378,18 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 
 	// Use ffmpeg to convert to PCM first, then we'll handle Opus encoding
 	cmd := exec.Command("ffmpeg",
-		"-i", "pipe:0",           // input from stdin
-		"-f", "s16le",            // raw PCM format
-		"-ar", "48000",           // sample rate 48kHz
-		"-ac", "2",               // stereo
-		"-loglevel", "error",     // reduce ffmpeg output
-		"pipe:1",                 // output to stdout
+    "-re",                 // read input in realtime
+    "-i", "pipe:0",        // input dari stdin
+    "-vn",                 // no video
+    "-ar", "48000",        // sample rate
+    "-ac", "2",            // stereo
+    "-acodec", "libopus",  // encode ke Opus
+    "-b:a", "128k",        // bitrate
+    "-application", "audio",
+    "-frame_duration", "20",
+    "-f", "data",          // raw data stream, bukan file .opus
+    "-loglevel", "error",
+    "pipe:1",
 	)
 	cmd.Stdin = stream
 	stdout, err := cmd.StdoutPipe()
@@ -403,14 +409,12 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	fmt.Printf("🔊 Starting audio playback...\n")
 	fmt.Printf("📊 Stream info: format=%s, itag=%d\n", format.MimeType, format.ItagNo)
 	
-	// Read PCM data and send to Discord
-	buffer := make([]byte, 960*4*2) // 960 frames * 4 bytes * 2 channels
-	frameCount := 0
-	
+	// Read Opus frames and send to Discord
+	frame := make([]byte, 960*2*2)
 	for {
-		n, err := stdout.Read(buffer)
+		n, err := stdout.Read(frame)
 		if err == io.EOF {
-			fmt.Printf("✅ Audio stream finished (processed %d frames)\n", frameCount)
+			fmt.Println("✅ Audio stream finished")
 			break
 		}
 		if err != nil {
@@ -418,21 +422,13 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 			break
 		}
 		if n > 0 {
-			frameCount++
-			
-			// Send PCM data directly to Discord (it will handle Opus encoding)
 			select {
-			case vc.OpusSend <- buffer[:n]:
+			case vc.OpusSend <- frame[:n]:
 			case <-time.After(5 * time.Second):
-				log.Printf("⚠️ Timeout sending audio data")
 				return fmt.Errorf("timeout sending audio")
 			}
-			
-			// Add small delay to prevent overwhelming Discord
-			time.Sleep(20 * time.Millisecond)
 		}
 	}
-
 	fmt.Printf("🎵 Audio playback completed\n")
 	return nil
 }
