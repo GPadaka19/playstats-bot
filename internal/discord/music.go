@@ -1,14 +1,17 @@
 package discord
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
+
+	"layeh.com/gopus"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kkdai/youtube/v2"
@@ -337,7 +340,7 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 	session.Queue.Current = 0
 }
 
-// playAudioStream downloads and streams YouTube audio into a voice channel (best practice)
+// playAudioStream streams audio using PCM encoding and layeh/gopus Opus encoder
 func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
     fmt.Printf("🎵 Starting audio stream for: %s\n", url)
 
@@ -355,7 +358,7 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
         return fmt.Errorf("tidak ada format audio tersedia")
     }
 
-    // Prefer Opus (WebM/251) > M4A (140)
+    // Pilih format dengan audio saja
     var format *youtube.Format
     for _, f := range formats {
         if f.ItagNo == 251 || strings.Contains(f.MimeType, "audio/webm") {
@@ -377,71 +380,67 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 
     fmt.Printf("📺 Using format: %s (itag: %d)\n", format.MimeType, format.ItagNo)
 
-    var cmd *exec.Cmd
-    if strings.Contains(format.MimeType, "opus") {
-        // Sudah dalam format Opus — tidak perlu encode ulang
-        cmd = exec.Command("ffmpeg",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-i", format.URL,
-            "-f", "opus",
-            "pipe:1",
-        )
-    } else {
-        // Format lain (AAC, M4A, dll) — transcode ke Opus
-        cmd = exec.Command("ffmpeg",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-i", format.URL,
-            "-vn",
-            "-ac", "2",
-            "-ar", "48000",
-            "-acodec", "libopus",
-            "-b:a", "96k",
-            "-f", "opus",
-            "pipe:1",
-        )
-    }
+    // Jalankan ffmpeg dan keluarkan PCM 16-bit stereo @48kHz
+    cmd := exec.Command("ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", format.URL,
+        "-f", "s16le",
+        "-ar", "48000",
+        "-ac", "2",
+        "pipe:1",
+    )
 
     stdout, err := cmd.StdoutPipe()
     if err != nil {
         return fmt.Errorf("gagal buat stdout ffmpeg: %v", err)
     }
 
-    cmd.Stderr = os.Stderr
-
     if err := cmd.Start(); err != nil {
         return fmt.Errorf("gagal mulai ffmpeg: %v", err)
+    }
+
+    defer cmd.Wait()
+
+    // Buat encoder Opus
+    opusEncoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
+    if err != nil {
+        return fmt.Errorf("gagal inisialisasi Opus encoder: %v", err)
     }
 
     vc.Speaking(true)
     defer vc.Speaking(false)
 
-    fmt.Println("🔊 Starting audio playback via Opus")
+    fmt.Println("🔊 Starting PCM → Opus audio streaming")
 
-    buffer := make([]byte, 4096)
+    pcmBuf := make([]byte, 960*2*2) // 20ms frame @48kHz stereo
+    pcmInt16 := make([]int16, 960*2)
+
     for {
-        n, err := stdout.Read(buffer)
-        if err == io.EOF {
+        if _, err := io.ReadFull(stdout, pcmBuf); err == io.EOF {
             fmt.Println("✅ Audio stream finished")
             break
-        }
-        if err != nil {
-            log.Printf("❌ Error reading ffmpeg output: %v", err)
+        } else if err != nil {
+            log.Printf("❌ Error reading PCM data: %v", err)
             break
         }
-        if n > 0 {
-            frameData := buffer[:n]
-            select {
-            case vc.OpusSend <- frameData:
-            case <-time.After(5 * time.Second):
-                return fmt.Errorf("timeout sending audio frame")
-            }
-        }
-    }
 
-    if err := cmd.Wait(); err != nil {
-        log.Printf("⚠️ ffmpeg exited with error: %v", err)
+        if err := binary.Read(bytes.NewReader(pcmBuf), binary.LittleEndian, pcmInt16); err != nil {
+            log.Printf("❌ Error decoding PCM: %v", err)
+            continue
+        }
+
+        opusFrame, err := opusEncoder.Encode(pcmInt16, 960, 1920)
+        if err != nil {
+            log.Printf("❌ Error encoding Opus frame: %v", err)
+            continue
+        }
+
+        select {
+        case vc.OpusSend <- opusFrame:
+        case <-time.After(5 * time.Second):
+            return fmt.Errorf("timeout sending audio frame")
+        }
     }
 
     fmt.Printf("🎵 Audio playback completed\n")

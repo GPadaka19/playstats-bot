@@ -7,6 +7,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/kkdai/youtube/v2 v2.10.4
 	github.com/lib/pq v1.10.9
+	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32
 )
 
 require (
