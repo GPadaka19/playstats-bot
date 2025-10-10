@@ -13,6 +13,35 @@ services:
     volumes:
       - .env:/app/.env
 
+  lavalink:
+    image: fredboat/lavalink:3.7.12
+    container_name: music-lavalink
+    restart: unless-stopped
+    networks:
+      - playstats-network
+    volumes:
+      - ./Discord-MusicBot/docker/application.yml:/opt/Lavalink/application.yml:ro
+
+  discord-musicbot:
+    build: ./Discord-MusicBot
+    image: discord-musicbot:latest
+    container_name: discord-musicbot
+    restart: unless-stopped
+    networks:
+      - playstats-network
+    depends_on:
+      - lavalink
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
+      - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
+      - WEBSITE_URL=${WEBSITE_URL:-http://localhost:4200}
+      - LAVALINK_HOST=lavalink
+      - LAVALINK_PORT=2333
+      - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
+      - LAVALINK_IDENTIFIER=Main Node
+      - LAVALINK_SECURE=false
+
 networks:
   playstats-network:
     external: true 
