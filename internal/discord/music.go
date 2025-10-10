@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -355,7 +356,7 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	if len(formats) == 0 {
 		return fmt.Errorf("tidak ada audio format tersedia")
 	}
-	
+
 	// Prefer m4a format (itag 140) or use first available
 	var format *youtube.Format
 	for _, f := range formats {
@@ -367,31 +368,25 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	if format == nil {
 		format = &formats[0]
 	}
-	
+
 	fmt.Printf("📺 Using format: %s (itag: %d)\n", format.MimeType, format.ItagNo)
 
-	stream, _, err := ytClient.GetStream(video, format)
-	if err != nil {
-		return fmt.Errorf("gagal ambil stream YouTube: %v", err)
-	}
-	defer stream.Close()
-
-	// Use ffmpeg to convert to Opus frames for Discord
+	// Use ffmpeg to convert to Opus frames for Discord, input directly from format.URL
 	cmd := exec.Command("ffmpeg",
-		"-re",                 // read input in realtime
-		"-i", "pipe:0",        // input dari stdin
-		"-vn",                 // no video
-		"-ar", "48000",        // sample rate
-		"-ac", "2",            // stereo
-		"-acodec", "libopus",  // encode ke Opus
-		"-b:a", "128k",        // bitrate
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-i", format.URL,
+		"-vn",
+		"-ac", "2",
+		"-ar", "48000",
+		"-acodec", "libopus",
+		"-b:a", "128k",
 		"-application", "audio",
 		"-frame_duration", "20",
-		"-f", "opus",          // output as Opus frames
-		"-loglevel", "error",
+		"-f", "opus",
 		"pipe:1",
 	)
-	cmd.Stdin = stream
+	cmd.Stderr = os.Stdout
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("gagal buat stdout ffmpeg: %v", err)
