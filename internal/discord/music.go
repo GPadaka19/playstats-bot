@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -337,99 +336,101 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 	session.Queue.Current = 0
 }
 
-// playAudioStream downloads and streams YouTube audio into a voice channel
+// playAudioStream downloads and streams YouTube audio into a voice channel (Opus)
 func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
-	fmt.Printf("🎵 Starting audio stream for: %s\n", url)
-	
-	// Check if voice connection is ready
-	if vc == nil || !vc.Ready {
-		return fmt.Errorf("voice connection tidak ready")
-	}
-	
-	video, err := ytClient.GetVideo(url)
-	if err != nil {
-		return fmt.Errorf("gagal ambil info video: %v", err)
-	}
+    fmt.Printf("🎵 Starting audio stream for: %s\n", url)
 
-	// Get audio format
-	formats := video.Formats.WithAudioChannels()
-	if len(formats) == 0 {
-		return fmt.Errorf("tidak ada audio format tersedia")
-	}
+    if vc == nil || !vc.Ready {
+        return fmt.Errorf("voice connection tidak ready")
+    }
 
-	// Prefer m4a format (itag 140) or use first available
-	var format *youtube.Format
-	for _, f := range formats {
-		if f.ItagNo == 140 {
-			format = &f
-			break
-		}
-	}
-	if format == nil {
-		format = &formats[0]
-	}
+    video, err := ytClient.GetVideo(url)
+    if err != nil {
+        return fmt.Errorf("gagal ambil info video: %v", err)
+    }
 
-	fmt.Printf("📺 Using format: %s (itag: %d)\n", format.MimeType, format.ItagNo)
+    formats := video.Formats.WithAudioChannels()
+    if len(formats) == 0 {
+        return fmt.Errorf("tidak ada format audio tersedia")
+    }
 
-	// Use ffmpeg to convert to Opus frames for Discord, input directly from format.URL
-	cmd := exec.Command("ffmpeg",
-		"-hide_banner",
-		"-loglevel", "warning",
-		"-i", format.URL,
-		"-vn",
-		"-ac", "2",
-		"-ar", "48000",
-		"-acodec", "libopus",
-		"-b:a", "128k",
-		"-application", "audio",
-		"-frame_duration", "20",
-		"-f", "opus",
-		"pipe:1",
-	)
-	cmd.Stderr = os.Stdout
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("gagal buat stdout ffmpeg: %v", err)
-	}
+    // Pilih format — diutamakan itag 140 (m4a) atau fallback ke yang pertama
+    var format youtube.Format
+    found := false
+    for _, f := range formats {
+        if f.ItagNo == 140 {
+            format = f
+            found = true
+            break
+        }
+    }
+    if !found {
+        format = formats[0]
+    }
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("gagal mulai ffmpeg: %v", err)
-	}
+    fmt.Printf("📺 Using format: %s (itag: %d)\n", format.MimeType, format.ItagNo)
 
-	// Start speaking
-	vc.Speaking(true)
-	defer vc.Speaking(false)
+    // Gunakan ffmpeg untuk menghasilkan opus data
+    // Kita pakai format.URL langsung (YouTube media URL) sebagai input
+    cmd := exec.Command("ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", format.URL,
+        "-vn", // tanpa video
+        "-ac", "2",
+        "-ar", "48000",
+        "-acodec", "libopus",
+        "-b:a", "96k",            // bitrate audio
+        "-application", "audio",
+        "-frame_duration", "20",  // 20 ms per frame
+        "-f", "opus",
+        "pipe:1",
+    )
+    stdout, err := cmd.StdoutPipe()
+    if err != nil {
+        return fmt.Errorf("gagal buat stdout ffmpeg: %v", err)
+    }
 
-	fmt.Printf("🔊 Starting audio playback...\n")
-	fmt.Printf("📊 Stream info: format=%s, itag=%d\n", format.MimeType, format.ItagNo)
+    if err := cmd.Start(); err != nil {
+        return fmt.Errorf("gagal mulai ffmpeg: %v", err)
+    }
 
-	// Read Opus frames and send to Discord
-	frame := make([]byte, 4096)
-	for {
-		n, err := stdout.Read(frame)
-		if err == io.EOF {
-			fmt.Println("✅ Audio stream finished")
-			break
-		}
-		if err != nil {
-			log.Printf("❌ Error reading ffmpeg output: %v", err)
-			break
-		}
-		if n > 0 {
-			select {
-			case vc.OpusSend <- frame[:n]:
-			case <-time.After(5 * time.Second):
-				return fmt.Errorf("timeout sending audio")
-			}
-		}
-	}
+    // Set speaking status
+    vc.Speaking(true)
+    defer vc.Speaking(false)
 
-	// Wait for ffmpeg to fully finish
-	if err := cmd.Wait(); err != nil {
-		log.Printf("⚠️ ffmpeg exited with error: %v", err)
-	}
-	fmt.Printf("🎵 Audio playback completed\n")
-	return nil
+    fmt.Println("🔊 Starting audio playback via Opus")
+
+    // Baca frame Opus dan kirim ke Discord
+    buffer := make([]byte, 4096) // buffer cukup besar
+    for {
+        n, err := stdout.Read(buffer)
+        if err == io.EOF {
+            fmt.Println("✅ Audio stream finished")
+            break
+        }
+        if err != nil {
+            log.Printf("❌ Error reading ffmpeg output: %v", err)
+            break
+        }
+        if n > 0 {
+            frameData := buffer[:n]
+            select {
+            case vc.OpusSend <- frameData:
+                // berhasil kirim
+            case <-time.After(5 * time.Second):
+                return fmt.Errorf("timeout sending audio frame")
+            }
+        }
+    }
+
+    // tunggu ffmpeg selesai
+    if err := cmd.Wait(); err != nil {
+        log.Printf("⚠️ ffmpeg exited with error: %v", err)
+    }
+
+    fmt.Printf("🎵 Audio playback completed\n")
+    return nil
 }
 
 // handleSkipCommand handles skip command
