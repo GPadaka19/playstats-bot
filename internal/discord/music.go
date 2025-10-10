@@ -376,20 +376,20 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	}
 	defer stream.Close()
 
-	// Use ffmpeg to convert to PCM first, then we'll handle Opus encoding
+	// Use ffmpeg to convert to Opus frames for Discord
 	cmd := exec.Command("ffmpeg",
-    "-re",                 // read input in realtime
-    "-i", "pipe:0",        // input dari stdin
-    "-vn",                 // no video
-    "-ar", "48000",        // sample rate
-    "-ac", "2",            // stereo
-    "-acodec", "libopus",  // encode ke Opus
-    "-b:a", "128k",        // bitrate
-    "-application", "audio",
-    "-frame_duration", "20",
-    "-f", "data",          // raw data stream, bukan file .opus
-    "-loglevel", "error",
-    "pipe:1",
+		"-re",                 // read input in realtime
+		"-i", "pipe:0",        // input dari stdin
+		"-vn",                 // no video
+		"-ar", "48000",        // sample rate
+		"-ac", "2",            // stereo
+		"-acodec", "libopus",  // encode ke Opus
+		"-b:a", "128k",        // bitrate
+		"-application", "audio",
+		"-frame_duration", "20",
+		"-f", "opus",          // output as Opus frames
+		"-loglevel", "error",
+		"pipe:1",
 	)
 	cmd.Stdin = stream
 	stdout, err := cmd.StdoutPipe()
@@ -400,7 +400,6 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("gagal mulai ffmpeg: %v", err)
 	}
-	defer cmd.Wait()
 
 	// Start speaking
 	vc.Speaking(true)
@@ -408,9 +407,9 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 
 	fmt.Printf("🔊 Starting audio playback...\n")
 	fmt.Printf("📊 Stream info: format=%s, itag=%d\n", format.MimeType, format.ItagNo)
-	
+
 	// Read Opus frames and send to Discord
-	frame := make([]byte, 960*2*2)
+	frame := make([]byte, 4096)
 	for {
 		n, err := stdout.Read(frame)
 		if err == io.EOF {
@@ -428,6 +427,11 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 				return fmt.Errorf("timeout sending audio")
 			}
 		}
+	}
+
+	// Wait for ffmpeg to fully finish
+	if err := cmd.Wait(); err != nil {
+		log.Printf("⚠️ ffmpeg exited with error: %v", err)
 	}
 	fmt.Printf("🎵 Audio playback completed\n")
 	return nil
