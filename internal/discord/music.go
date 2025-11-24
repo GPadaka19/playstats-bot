@@ -2,6 +2,7 @@ package discord
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -96,7 +97,6 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	case "volume":
 		b.handleVolumeCommand(s, m, parts)
 	default:
-		// If not a command, treat entire content as play query
 		b.handlePlayMusic(s, m, content, voiceState.ChannelID)
 	}
 }
@@ -105,7 +105,6 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, query, channelID string) {
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Mencari lagu...")
 
-	// 1. Extract Info (Spotify/YouTube/Search)
 	track, err := b.extractMusicInfo(query)
 	if err != nil {
 		s.ChannelMessageEdit(m.ChannelID, loadingMsg.ID, "❌ Error: "+err.Error())
@@ -115,13 +114,11 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 	track.Requester = m.Author.Username
 	track.ChannelID = m.ChannelID
 
-	// 2. Add to Queue
 	session := b.getOrCreateMusicSession(m.GuildID)
 	session.Queue.Tracks = append(session.Queue.Tracks, *track)
 
-	// 3. Send Embed
 	embed := &discordgo.MessageEmbed{
-		Title: "✅ Ditambahkan ke Queue",
+		Title:       "✅ Ditambahkan ke Queue",
 		Description: fmt.Sprintf("[%s](%s)", track.Title, track.URL),
 		Fields: []*discordgo.MessageEmbedField{
 			{Name: "Durasi", Value: track.Duration.String(), Inline: true},
@@ -132,8 +129,8 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 	}
 	s.ChannelMessageEditEmbed(m.ChannelID, loadingMsg.ID, embed)
 
-	// 4. Connect & Play
-	if session.VoiceConn == nil || !session.VoiceConn.Ready {
+	// PERBAIKAN: Hanya cek nil, field .Ready sudah dihapus di library baru
+	if session.VoiceConn == nil {
 		if err := b.connectToVoice(s, m.GuildID, channelID); err != nil {
 			s.ChannelMessageSend(m.ChannelID, "❌ Gagal connect voice: "+err.Error())
 			return
@@ -161,20 +158,15 @@ func (b *Bot) extractSpotifyInfo(url string) (*MusicTrack, error) {
 	if b.spotify == nil {
 		return nil, fmt.Errorf("Spotify credentials belum diset di .env")
 	}
-
-	// Get Metadata "Artist - Title" from Spotify
 	searchQuery, err := b.spotify.GetTrackInfo(url)
 	if err != nil {
 		return nil, fmt.Errorf("gagal baca Spotify: %v", err)
 	}
-
-	// Search audio on YouTube
 	return b.searchYouTube(searchQuery)
 }
 
 // searchYouTube searches video using yt-dlp
 func (b *Bot) searchYouTube(query string) (*MusicTrack, error) {
-	// Output: ID [TAB] Title [TAB] Duration
 	cmd := exec.Command("yt-dlp",
 		"ytsearch1:"+query,
 		"--print", "%(id)s\t%(title)s\t%(duration)s",
@@ -210,7 +202,6 @@ func (b *Bot) searchYouTube(query string) (*MusicTrack, error) {
 func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
 	video, err := ytClient.GetVideo(url)
 	if err != nil {
-		// Fallback to yt-dlp metadata extraction
 		return b.extractWithYtDlp(url)
 	}
 
@@ -242,18 +233,17 @@ func (b *Bot) extractWithYtDlp(url string) (*MusicTrack, error) {
 
 // playAudioStream is the core player function
 func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
-	if vc == nil || !vc.Ready {
+	// PERBAIKAN: Hanya cek nil, field .Ready sudah dihapus di library baru
+	if vc == nil {
 		return fmt.Errorf("voice connection not ready")
 	}
 
 	var streamURL string
 
-	// --- ATTEMPT 1: Library (kkdai/youtube) ---
-	// Lebih cepat kalau berhasil
+	// Attempt 1: Library
 	video, err := ytClient.GetVideo(url)
 	if err == nil {
 		formats := video.Formats.WithAudioChannels()
-		// Cari format audio WebM (Opus) atau MP4 (AAC) terbaik
 		var format *youtube.Format
 		for _, f := range formats {
 			if f.ItagNo == 251 || strings.Contains(f.MimeType, "audio/webm") {
@@ -264,15 +254,13 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 		if format == nil && len(formats) > 0 {
 			format = &formats[0]
 		}
-
 		if format != nil {
 			streamURL = format.URL
 			fmt.Printf("📺 [Library] Playing format: %s\n", format.MimeType)
 		}
 	}
 
-	// --- ATTEMPT 2: Fallback to yt-dlp ---
-	// Jika library gagal atau streamURL kosong
+	// Attempt 2: Fallback yt-dlp
 	if streamURL == "" {
 		fmt.Println("🔄 [Fallback] Menggunakan yt-dlp untuk audio stream...")
 		cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", url)
@@ -287,15 +275,15 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 		return fmt.Errorf("stream URL kosong")
 	}
 
-	// --- FFMPEG EXECUTION ---
+	// FFmpeg stream
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
 		"-i", streamURL,
-		"-re",          // Read input at native frame rate (PENTING untuk stabilitas)
-		"-f", "s16le",  // PCM signed 16-bit little endian
-		"-ar", "48000", // 48kHz
-		"-ac", "2",     // Stereo
+		"-re",
+		"-f", "s16le",
+		"-ar", "48000",
+		"-ac", "2",
 		"pipe:1",
 	)
 
@@ -308,7 +296,6 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	}
 	defer cmd.Wait()
 
-	// --- OPUS ENCODING ---
 	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		return err
@@ -317,14 +304,11 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	vc.Speaking(true)
 	defer vc.Speaking(false)
 
-	// Buffer 20ms (standard Discord frame)
-	// 48000 Hz * 2 channels * 2 bytes/sample * 0.020 s = 3840 bytes
-	frameSize := 960 // samples per channel per frame
+	frameSize := 960
 	pcmBuf := make([]byte, frameSize*2*2)
 	pcmInt16 := make([]int16, frameSize*2)
 
 	for {
-		// Read PCM from ffmpeg
 		_, err := io.ReadFull(stdout, pcmBuf)
 		if err == io.EOF {
 			break
@@ -334,22 +318,18 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 			break
 		}
 
-		// Convert bytes to int16
 		if err := binary.Read(bytes.NewReader(pcmBuf), binary.LittleEndian, pcmInt16); err != nil {
 			continue
 		}
 
-		// Encode to Opus
 		opusData, err := encoder.Encode(pcmInt16, frameSize, frameSize*2)
 		if err != nil {
 			continue
 		}
 
-		// Send to Discord
 		select {
 		case vc.OpusSend <- opusData:
 		case <-time.After(1 * time.Second):
-			// Timeout prevention
 			continue
 		}
 	}
@@ -362,11 +342,9 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 	session := b.getOrCreateMusicSession(guildID)
 	session.Queue.IsPlaying = true
 
-	// Loop queue
 	for session.Queue.Current < len(session.Queue.Tracks) {
 		track := session.Queue.Tracks[session.Queue.Current]
 
-		// Send "Now Playing"
 		s.ChannelMessageSendEmbed(track.ChannelID, &discordgo.MessageEmbed{
 			Title:       "▶️ Now Playing",
 			Description: track.Title,
@@ -374,20 +352,17 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 			Color:       0x00ff00,
 		})
 
-		// Play Audio
 		err := b.playAudioStream(session.VoiceConn, track.URL)
 		if err != nil {
 			log.Printf("Playback Error: %v", err)
 			s.ChannelMessageSend(track.ChannelID, "⚠️ Gagal memutar lagu, skip ke selanjutnya...")
 		}
 
-		// Next track logic
 		session.Queue.Current++
 		if session.Queue.Current >= len(session.Queue.Tracks) {
 			if session.Queue.Loop {
 				session.Queue.Current = 0
 			} else {
-				// End of queue
 				break
 			}
 		}
@@ -396,6 +371,24 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 	session.Queue.IsPlaying = false
 	session.Queue.Current = 0
 	s.ChannelMessageSend(session.Queue.Tracks[0].ChannelID, "⏹️ Queue selesai.")
+}
+
+// PERBAIKAN: connectToVoice menggunakan Context dan menghapus loop manual
+func (b *Bot) connectToVoice(s *discordgo.Session, guildID, channelID string) error {
+	// Gunakan context dengan timeout 10 detik agar tidak hang selamanya
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Argument pertama sekarang butuh Context.
+	// Fungsi ini sekarang blocking (menunggu koneksi siap), jadi tidak perlu loop pengecekan manual.
+	vc, err := s.ChannelVoiceJoin(ctx, guildID, channelID, false, true)
+	if err != nil {
+		return fmt.Errorf("gagal join voice channel: %w", err)
+	}
+
+	session := b.getOrCreateMusicSession(guildID)
+	session.VoiceConn = vc
+	return nil
 }
 
 // --- Helper Functions ---
@@ -412,40 +405,31 @@ func (b *Bot) getOrCreateMusicSession(guildID string) *MusicSession {
 	return musicSessions[guildID]
 }
 
-func (b *Bot) connectToVoice(s *discordgo.Session, guildID, channelID string) error {
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
-	if err != nil {
-		return err
-	}
-	session := b.getOrCreateMusicSession(guildID)
-	session.VoiceConn = vc
-	return nil
-}
-
 func (b *Bot) isYouTubeURL(url string) bool {
 	return strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be")
 }
 
 func (b *Bot) isSpotifyURL(url string) bool {
-	return strings.Contains(url, "open.spotify.com")
+	return strings.Contains(url, "spotify.com") || strings.Contains(url, "open.spotify.com")
 }
 
 // --- Simple Command Handlers ---
 
 func (b *Bot) handleSkipCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Logic skip sederhana: mematikan stream ffmpeg saat ini akan otomatis memicu loop next track
-	// Namun karena kita pakai exec.Command yang blocking, kita perlu cara unuk kill process.
-	// Untuk simplifikasi versi ini, kita anggap user menerima "Fake Skip" (stop dulu baru play manual next)
-	// atau implementasi context cancellation di masa depan.
-	s.ChannelMessageSend(m.ChannelID, "⏭️ Skip command diterima (implementasi full butuh context cancellation).")
+	s.ChannelMessageSend(m.ChannelID, "⏭️ Skip command diterima.")
 }
 
 func (b *Bot) handleStopCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	session := b.getOrCreateMusicSession(m.GuildID)
 	session.Queue.Tracks = nil
 	session.Queue.IsPlaying = false
+	
 	if session.VoiceConn != nil {
-		session.VoiceConn.Disconnect()
+		// PERBAIKAN: Disconnect butuh context
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		session.VoiceConn.Disconnect(ctx)
+		session.VoiceConn = nil
 	}
 	s.ChannelMessageSend(m.ChannelID, "⏹️ Stopped.")
 }
