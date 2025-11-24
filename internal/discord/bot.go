@@ -424,40 +424,30 @@ func (b *Bot) handleCompareCommand(s *discordgo.Session, m *discordgo.MessageCre
 
 // handleWeeklyCommand handles the !weekly command
 func (b *Bot) handleWeeklyCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Get current week start (Monday)
-	now := time.Now()
-	weekStart := now.AddDate(0, 0, -int(now.Weekday())+1).Format("2006-01-02")
+    now := time.Now().In(b.tzUTC7)
+    weekday := int(now.Weekday())
+    if weekday == 0 { weekday = 7 }
+    weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
 
-	stats, err := b.repository.GetWeeklyReport(m.Author.ID, m.GuildID, weekStart)
-	if err != nil {
-		log.Printf("Error getting weekly report: %v", err)
-		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil laporan mingguan.")
-		return
-	}
+    stats, err := b.repository.GetWeeklyReport(m.Author.ID, m.GuildID, weekStart)
+    if err != nil || len(stats) == 0 {
+        s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Belum ada data untuk minggu ini (%s).", weekStart))
+        return
+    }
 
-	if len(stats) == 0 {
-		s.ChannelMessageSend(m.ChannelID, "Belum ada data untuk minggu ini.")
-		return
-	}
+    var voiceTotal int64
+    var activityLines []string
+    for _, stat := range stats {
+        if stat.ActivityName == "" {
+            voiceTotal += stat.VoiceSeconds
+        } else {
+            activityLines = append(activityLines, fmt.Sprintf("• %s: %s", stat.ActivityName, utils.FormatDuration(stat.ActivitySeconds)))
+        }
+    }
 
-	var voiceTotal int64
-	var activityLines []string
-
-	for _, stat := range stats {
-		if stat.ActivityName == "" {
-			voiceTotal += stat.VoiceSeconds
-		} else {
-			activityLines = append(activityLines, fmt.Sprintf("- %s: %s",
-				stat.ActivityName, utils.FormatDuration(stat.ActivitySeconds)))
-		}
-	}
-
-	msg := fmt.Sprintf("📅 **Laporan Mingguan** (%s)\n\n"+
-		"🔊 Total Voice: %s\n"+
-		"🎮 Aktivitas:\n%s",
-		weekStart, utils.FormatDuration(voiceTotal), strings.Join(activityLines, "\n"))
-
-	s.ChannelMessageSend(m.ChannelID, msg)
+    msg := fmt.Sprintf("📅 **Laporan Minggu Ini** (%s)\n🔊 Voice: %s\n🎮 Activities:\n%s", 
+        weekStart, utils.FormatDuration(voiceTotal), strings.Join(activityLines, "\n"))
+    s.ChannelMessageSend(m.ChannelID, msg)
 }
 
 // handleMonthlyCommand handles the !monthly command
