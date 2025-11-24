@@ -9,6 +9,8 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/kkdai/youtube/v2 v2.10.4
 	github.com/lib/pq v1.10.9
+	github.com/zmb3/spotify/v2 v2.4.3
+	golang.org/x/oauth2 v0.33.0
 	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32
 )
 
