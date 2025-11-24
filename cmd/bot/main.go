@@ -29,7 +29,7 @@ func main() {
 	repository := database.NewRepository(db)
 
 	// Initialize Discord bot
-	bot, err := discord.New(cfg.DiscordToken, repository)
+	bot, err := discord.New(cfg, repository)
 	if err != nil {
 		log.Fatalf("Failed to create Discord bot: %v", err)
 	}

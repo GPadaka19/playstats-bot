@@ -8,20 +8,22 @@ import (
 
 // Config holds all configuration for our application
 type Config struct {
-	DiscordToken string
-	DatabaseDSN  string
+	DiscordToken 	string
+	DatabaseDSN  	string
+	SpotifyID		string
+	SpotifySecret	string
 }
 
 // Load loads configuration from environment variables
 func Load() (*Config, error) {
-	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
-		// .env file is optional, continue with environment variables
 	}
 
 	config := &Config{
-		DiscordToken: os.Getenv("DISCORD_TOKEN"),
-		DatabaseDSN:  os.Getenv("DATABASE_DSN"),
+		DiscordToken: 	os.Getenv("DISCORD_TOKEN"),
+		DatabaseDSN:  	os.Getenv("DATABASE_DSN"),
+		SpotifyID: 	  	os.Getenv("SPOTIFY_ID"),
+		SpotifySecret:	os.Getenv("SPOTIFY_SECRET"),
 	}
 
 	if config.DiscordToken == "" {
