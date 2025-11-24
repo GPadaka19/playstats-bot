@@ -245,22 +245,32 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 
 	// Close activities that were previously active but now inactive
 	for key, start := range b.activitySessions {
-		// key format: user:activity (global)
-		prefix := userID + ":"
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
-		activityName := strings.TrimPrefix(key, prefix)
-		if !activeSet[activityName] {
-			// accumulate duration
-			seconds := int64(time.Since(start).Seconds())
-			delete(b.activitySessions, key)
-			if err := b.repository.AddActivitySeconds(userID, activityName, seconds); err != nil {
-				log.Printf("Error adding activity seconds: %v", err)
-			}
-			log.Printf("activity off: %s (%s) | %s +%ds", username, userID, activityName, seconds)
-		}
-	}
+        prefix := userID + ":"
+        if !strings.HasPrefix(key, prefix) { continue }
+        
+        activityName := strings.TrimPrefix(key, prefix)
+        if !activeSet[activityName] {
+            seconds := int64(time.Since(start).Seconds())
+            delete(b.activitySessions, key)
+            
+            // 1. Simpan Total Hours (Logic Lama)
+            b.repository.AddActivitySeconds(userID, activityName, seconds)
+
+            // 2. FITUR BARU: Simpan Daily & Weekly Stats
+            now := time.Now().In(b.tzUTC7)
+            date := now.Format("2006-01-02")
+            
+            weekday := int(now.Weekday())
+            if weekday == 0 { weekday = 7 }
+            weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
+
+            // Simpan ke DB (Activity Only -> voiceSeconds = 0)
+            b.repository.AddDailyStats(date, userID, guildID, 0, seconds, activityName)
+            b.repository.AddWeeklyStats(weekStart, userID, guildID, 0, seconds, activityName)
+
+            log.Printf("🎮 Activity STOP: %s | %s (+%ds) [Saved]", username, activityName, seconds)
+        }
+    }
 
 	// Start new activities that haven't been recorded
 	for name := range activeSet {
