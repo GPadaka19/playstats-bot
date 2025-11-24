@@ -25,12 +25,12 @@ func New(dsn string) (*DB, error) {
 	}
 
 	db := &DB{conn: conn}
-	
+
 	// Initialize tables and run migrations
 	if err := db.createTables(); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
-	
+
 	if err := db.migrateSchema(); err != nil {
 		return nil, fmt.Errorf("failed to migrate schema: %w", err)
 	}
@@ -104,25 +104,25 @@ func (db *DB) migrateSchema() error {
 	migrations := []string{
 		// Ensure total_seconds column exists (for very old versions)
 		`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS total_seconds BIGINT NOT NULL DEFAULT 0`,
-		
+
 		// Migrate from total_minutes to total_seconds if old schema exists
 		`UPDATE voice_hours SET total_seconds = total_minutes * 60 WHERE total_seconds = 0 AND EXISTS (
 			SELECT 1 FROM information_schema.columns WHERE table_name='voice_hours' AND column_name='total_minutes'
 		)`,
 		`ALTER TABLE voice_hours DROP COLUMN IF EXISTS total_minutes`,
-		
+
 		// Add guild_id column if not exists in voice_hours
 		`ALTER TABLE voice_hours ADD COLUMN IF NOT EXISTS guild_id TEXT`,
-		
+
 		// Migrate old data that stored 'guild:user' in user_id
 		`UPDATE voice_hours SET guild_id = split_part(user_id, ':', 1) WHERE guild_id IS NULL AND position(':' in user_id) > 0`,
 		`UPDATE voice_hours SET user_id = split_part(user_id, ':', 2) WHERE position(':' in user_id) > 0`,
-		
+
 		// Fill empty values and make NOT NULL
 		`UPDATE voice_hours SET guild_id = COALESCE(guild_id, '')`,
 		`ALTER TABLE voice_hours ALTER COLUMN user_id SET NOT NULL`,
 		`ALTER TABLE voice_hours ALTER COLUMN guild_id SET NOT NULL`,
-		
+
 		// Ensure composite primary key (user_id, guild_id)
 		`DO $$
 		DECLARE
@@ -135,7 +135,7 @@ func (db *DB) migrateSchema() error {
 			END IF;
 		END$$;`,
 		`ALTER TABLE voice_hours ADD CONSTRAINT voice_hours_pkey PRIMARY KEY (user_id, guild_id)`,
-		
+
 		// Migrate old activity_hours (if has guild_id) to global aggregated
 		`CREATE TABLE IF NOT EXISTS activity_hours_new (
 			user_id TEXT NOT NULL,
@@ -143,14 +143,14 @@ func (db *DB) migrateSchema() error {
 			total_seconds BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, activity_name)
 		)`,
-		
+
 		// Aggregate from old schema to new
 		`INSERT INTO activity_hours_new (user_id, activity_name, total_seconds)
 		SELECT user_id, activity_name, SUM(total_seconds)
 		FROM activity_hours
 		GROUP BY user_id, activity_name
 		ON CONFLICT (user_id, activity_name) DO UPDATE SET total_seconds = activity_hours_new.total_seconds + EXCLUDED.total_seconds`,
-		
+
 		// Replace table
 		`DROP TABLE IF EXISTS activity_hours`,
 		`ALTER TABLE activity_hours_new RENAME TO activity_hours`,
