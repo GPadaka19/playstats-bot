@@ -225,9 +225,13 @@ func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCre
 	content = strings.ReplaceAll(content, "<@!"+botUserID+">", "")
 	content = strings.TrimSpace(content)
 
+	if content == "" {
+		b.handleStatsCommand(s, m)
+		return
+	}
+
 	// Check if it's a music-related command or just stats
-	if content == "" || strings.ToLower(content) == "stats" {
-		// Default to stats if no specific command or "stats"
+	if strings.ToLower(content) == "stats" {
 		b.handleStatsCommand(s, m)
 		return
 	}
@@ -257,29 +261,29 @@ func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCre
 
 // isMusicQuery checks if the content looks like a music query
 func (b *Bot) isMusicQuery(content string) bool {
-	// Check for YouTube URLs
-	youtubePatterns := []string{
-		"youtube.com",
-		"youtu.be",
-	}
-
-	// Check for Spotify URLs
-	spotifyPatterns := []string{
-		"http://googleusercontent.com/spotify.com",
-	}
-
 	content = strings.ToLower(content)
 
-	// Check for URL patterns
-	for _, pattern := range append(youtubePatterns, spotifyPatterns...) {
-		if strings.Contains(content, pattern) {
+	// 1. Cek Link (Paling Prioritas)
+	// Kita buat pattern yang lebih umum biar open.spotify.com ketangkap
+	if strings.Contains(content, "http") {
+		if strings.Contains(content, "spotify.com") || strings.Contains(content, "youtu") {
 			return true
 		}
 	}
 
-	// If it's more than 3 words and doesn't look like a command, treat as search query
+	// 2. Cek apakah ini pencarian lagu? (Misal: "@Bot PlayShape of You")
+	// Jika text panjangnya lebih dari 3 kata, kita anggap dia nyari lagu
 	words := strings.Fields(content)
-	return len(words) > 3
+	if len(words) >= 3 {
+		return true
+	}
+	
+	// 3. Cek keyword eksplisit "play"
+	if strings.HasPrefix(content, "play ") {
+		return true
+	}
+
+	return false
 }
 
 // handleVoiceCommand handles the !voice command
