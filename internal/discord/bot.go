@@ -186,46 +186,31 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpd
 	}
 
 	// Join channel
-	if vs.ChannelID != "" && b.sessions[key].Start.IsZero() {
-		b.sessions[key] = models.VoiceSession{
-			Start:     time.Now().UTC(),
-			ChannelID: vs.ChannelID,
-		}
-
-		// Get channel info
-		channel, err := s.Channel(vs.ChannelID)
-		channelName := vs.ChannelID
-		if err == nil && channel != nil {
-			channelName = channel.Name
-		}
-
-		fmt.Printf("➡️ Join: %s (%s) %s channel=%s (%s)\n",
-			username, userID, b.sessions[key].Start.In(b.tzUTC7), vs.ChannelID, channelName)
-	}
-
-	// Leave channel
 	if vs.ChannelID == "" && !b.sessions[key].Start.IsZero() {
-		start := b.sessions[key].Start
-		channelID := b.sessions[key].ChannelID
-		durationSeconds := int64(time.Since(start).Seconds())
-		delete(b.sessions, key)
+        start := b.sessions[key].Start
+        channelID := b.sessions[key].ChannelID
+        durationSeconds := int64(time.Since(start).Seconds())
+        delete(b.sessions, key)
 
-		// Get channel info for leave message
-		channel, err := s.Channel(channelID)
-		channelName := channelID
-		if err == nil && channel != nil {
-			channelName = channel.Name
-		}
+        // 1. Simpan Total Hours (Logic Lama - Tetap Biarkan)
+        b.repository.AddVoiceSeconds(userID, guildID, durationSeconds)
+        b.repository.AddChannelSeconds(userID, guildID, channelID, durationSeconds)
 
-		if err := b.repository.AddVoiceSeconds(userID, guildID, durationSeconds); err != nil {
-			log.Printf("Error adding voice seconds: %v", err)
-		}
-		if err := b.repository.AddChannelSeconds(userID, guildID, channelID, durationSeconds); err != nil {
-			log.Printf("Error adding channel seconds: %v", err)
-		}
-		fmt.Printf("⬅️ Leave: %s (%s), +%d seconds channel=%s (%s)\n",
-			username, userID, durationSeconds, channelID, channelName)
-	}
+        // 2. FITUR BARU: Simpan Daily & Weekly Stats
+        now := time.Now().In(b.tzUTC7)
+        date := now.Format("2006-01-02") // Format tanggal YYYY-MM-DD
+        
+        // Hitung awal minggu (Senin)
+        weekday := int(now.Weekday())
+        if weekday == 0 { weekday = 7 } // Minggu (0) jadi 7
+        weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
+
+        // Simpan ke DB (Voice Only -> activitySeconds = 0)
+        b.repository.AddDailyStats(date, userID, guildID, durationSeconds, 0, "")
+        b.repository.AddWeeklyStats(weekStart, userID, guildID, durationSeconds, 0, "")
+
+        fmt.Printf("⬅️ Leave: %s (%s), +%d seconds (Saved to Daily/Weekly)\n", username, userID, durationSeconds)
+    }
 }
 
 // presenceUpdate handles presence updates for activity tracking
