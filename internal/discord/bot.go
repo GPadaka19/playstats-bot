@@ -37,7 +37,8 @@ func New(cfg *config.Config, repository *database.Repository) (*Bot, error) {
 	session.Identify.Intents = discordgo.IntentsGuilds |
 		discordgo.IntentsGuildPresences |
 		discordgo.IntentsGuildVoiceStates |
-		discordgo.IntentsGuildMessages
+		discordgo.IntentsGuildMessages |
+		discordgo.IntentsMessageContent
 
 	// Inisialisasi Spotify Client menggunakan data dari cfg
 	// Kita abaikan error (nil) jika user tidak mengisi kredensial di .env
@@ -73,6 +74,102 @@ func (b *Bot) Start() error {
 // Stop stops the bot
 func (b *Bot) Stop() error {
 	return b.session.Close()
+}
+
+// messageCreate handles message creation events
+func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if m.Author.Bot {
+		return
+	}
+
+	content := strings.TrimSpace(m.Content)
+	botUserID := s.State.User.ID
+	
+	// Cek mention
+	isMentioned := strings.Contains(content, "<@"+botUserID+">") || strings.Contains(content, "<@!"+botUserID+">")
+
+	switch {
+	case content == "!voice" || strings.HasPrefix(content, "!voicechan"):
+		b.handleVoiceCommand(s, m)
+	case strings.HasPrefix(content, "!play"):
+		// !play dipakai untuk statistik game, bukan musik
+		b.handlePlayCommand(s, m)
+	case isMentioned:
+		// Handle mention (@Bot ...) -> Musik atau Stats
+		b.handleMentionCommand(s, m)
+	case content == "!stats":
+		b.handleStatsCommand(s, m)
+	case strings.HasPrefix(content, "!leaderboard"):
+		b.handleLeaderboardCommand(s, m)
+	case strings.HasPrefix(content, "!compare"):
+		b.handleCompareCommand(s, m)
+	case content == "!weekly":
+		b.handleWeeklyCommand(s, m)
+	case content == "!monthly":
+		b.handleMonthlyCommand(s, m)
+	}
+}
+
+// handleMentionCommand handles bot mention commands (Music Router)
+func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	content := strings.TrimSpace(m.Content)
+
+	// Bersihkan mention dari text
+	botUserID := s.State.User.ID
+	content = strings.ReplaceAll(content, "<@"+botUserID+">", "")
+	content = strings.ReplaceAll(content, "<@!"+botUserID+">", "")
+	content = strings.TrimSpace(content)
+
+	// 1. Jika kosong -> Tampilkan Stats (Default)
+	if content == "" {
+		b.handleStatsCommand(s, m)
+		return
+	}
+
+	// 2. Cek Command Musik Spesifik
+	// PERBAIKAN: Menambahkan "help" dan "leave" ke daftar ini
+	musicCommands := []string{"skip", "stop", "leave", "queue", "pause", "resume", "loop", "volume", "help"}
+	
+	parts := strings.Fields(content)
+	if len(parts) > 0 {
+		firstWord := strings.ToLower(parts[0])
+		for _, cmd := range musicCommands {
+			if firstWord == cmd {
+				// Arahkan ke music.go
+				b.handleMusicCommand(s, m)
+				return
+			}
+		}
+	}
+
+	// 3. Cek Link Musik (URL)
+	if b.isMusicQuery(content) {
+		b.handleMusicCommand(s, m)
+		return
+	}
+
+	// 4. Default Fallback -> Stats
+	// Jika user ngetik hal acak seperti "@Bot halo", tampilkan stats
+	b.handleStatsCommand(s, m)
+}
+
+// isMusicQuery checks if the content looks like a music query
+func (b *Bot) isMusicQuery(content string) bool {
+	content = strings.ToLower(content)
+
+	// Cek Link (Spotify & YouTube)
+	if strings.Contains(content, "http") {
+		if strings.Contains(content, "spotify") || strings.Contains(content, "youtu") {
+			return true
+		}
+	}
+
+	// Cek Keyword "Play" eksplisit
+	if strings.HasPrefix(content, "play ") {
+		return true
+	}
+
+	return false
 }
 
 // voiceStateUpdate handles voice state updates
@@ -149,6 +246,12 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 	activeSet := make(map[string]bool)
 	for _, act := range p.Activities {
 		name := act.Name
+		
+		// PERBAIKAN: Filter activity "Hang Status"
+		if name == "Hang Status" {
+			continue
+		}
+
 		if name != "" {
 			activeSet[name] = true
 			log.Printf("activity on: %s (%s) | %s", username, userID, name)
@@ -184,229 +287,70 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 	}
 }
 
-// messageCreate handles message creation events
-func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.Bot {
-		return
-	}
-
-	content := strings.TrimSpace(m.Content)
-	botUserID := s.State.User.ID // ambil ID bot
-	isMentioned := strings.Contains(content, "<@"+botUserID+">") || strings.Contains(content, "<@!"+botUserID+">")
-
-	switch {
-	case content == "!voice" || strings.HasPrefix(content, "!voicechan"):
-		b.handleVoiceCommand(s, m)
-	case strings.HasPrefix(content, "!play"):
-		b.handlePlayCommand(s, m)
-	case isMentioned:
-		// Handle bot mention commands (music or stats)
-		b.handleMentionCommand(s, m)
-	case content == "!stats":
-		b.handleStatsCommand(s, m)
-	case strings.HasPrefix(content, "!leaderboard"):
-		b.handleLeaderboardCommand(s, m)
-	case strings.HasPrefix(content, "!compare"):
-		b.handleCompareCommand(s, m)
-	case content == "!weekly":
-		b.handleWeeklyCommand(s, m)
-	case content == "!monthly":
-		b.handleMonthlyCommand(s, m)
-	}
-}
-
-// handleMentionCommand handles bot mention commands
-func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	content := strings.TrimSpace(m.Content)
-
-	// Remove bot mention from content to get the actual command
-	botUserID := s.State.User.ID
-	content = strings.ReplaceAll(content, "<@"+botUserID+">", "")
-	content = strings.ReplaceAll(content, "<@!"+botUserID+">", "")
-	content = strings.TrimSpace(content)
-
-	if content == "" {
-		b.handleStatsCommand(s, m)
-		return
-	}
-
-	// Check if it's a music-related command or just stats
-	if strings.ToLower(content) == "stats" {
-		b.handleStatsCommand(s, m)
-		return
-	}
-
-	// Check if it's a music command
-	musicCommands := []string{"skip", "stop", "queue", "pause", "resume", "loop", "volume"}
-	parts := strings.Fields(content)
-	if len(parts) > 0 {
-		firstWord := strings.ToLower(parts[0])
-		for _, cmd := range musicCommands {
-			if firstWord == cmd {
-				b.handleMusicCommand(s, m)
-				return
-			}
-		}
-	}
-
-	// If it contains URL patterns or seems like a search query, treat as music
-	if b.isMusicQuery(content) {
-		b.handleMusicCommand(s, m)
-		return
-	}
-
-	// Default to stats for anything else
-	b.handleStatsCommand(s, m)
-}
-
-// isMusicQuery checks if the content looks like a music query
-func (b *Bot) isMusicQuery(content string) bool {
-	content = strings.ToLower(content)
-
-	// 1. Cek Link (Paling Prioritas)
-	// Kita buat pattern yang lebih umum biar open.spotify.com ketangkap
-	if strings.Contains(content, "http") {
-		if strings.Contains(content, "spotify.com") || strings.Contains(content, "youtu") {
-			return true
-		}
-	}
-
-	// 2. Cek apakah ini pencarian lagu? (Misal: "@Bot PlayShape of You")
-	// Jika text panjangnya lebih dari 3 kata, kita anggap dia nyari lagu
-	words := strings.Fields(content)
-	if len(words) >= 3 {
-		return true
-	}
-	
-	// 3. Cek keyword eksplisit "play"
-	if strings.HasPrefix(content, "play ") {
-		return true
-	}
-
-	return false
-}
-
-// handleVoiceCommand handles the !voice command
 func (b *Bot) handleVoiceCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	channelHours, err := b.repository.GetVoiceChannelHours(m.Author.ID, m.GuildID)
-	if err != nil {
-		log.Printf("Error getting voice channel hours: %v", err)
-		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil data voice per channel.")
-		return
-	}
-
+	channelHours, _ := b.repository.GetVoiceChannelHours(m.Author.ID, m.GuildID)
 	var lines []string
 	for _, ch := range channelHours {
 		lines = append(lines, fmt.Sprintf("<#%s>: %s", ch.ChannelID, utils.FormatDuration(ch.TotalSeconds)))
 	}
-
-	// Get total overall
-	totalSeconds, err := b.repository.GetVoiceHours(m.Author.ID, m.GuildID)
-	if err != nil {
-		log.Printf("Error getting total voice hours: %v", err)
-	}
-
-	if len(lines) == 0 {
-		lines = append(lines, "(belum ada data per channel)")
-	}
-
-	msg := fmt.Sprintf("🔊 %s, voice per channel:\n%s\nTotal: %s",
-		m.Author.Username, strings.Join(lines, "\n"), utils.FormatDuration(totalSeconds))
+	totalSeconds, _ := b.repository.GetVoiceHours(m.Author.ID, m.GuildID)
+	
+	if len(lines) == 0 { lines = append(lines, "(belum ada data)") }
+	
+	msg := fmt.Sprintf("🔊 **Voice Stats** %s\nTotal: %s\n\n%s", 
+		m.Author.Username, utils.FormatDuration(totalSeconds), strings.Join(lines, "\n"))
 	s.ChannelMessageSend(m.ChannelID, msg)
 }
 
-// handlePlayCommand handles the !play command
 func (b *Bot) handlePlayCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	content := strings.TrimSpace(m.Content)
-	name := strings.TrimSpace(strings.TrimPrefix(content, "!play"))
+	// Command !play untuk cek durasi main game
+	name := strings.TrimSpace(strings.TrimPrefix(m.Content, "!play"))
 	if name == "" {
-		s.ChannelMessageSend(m.ChannelID, "Format: !play <nama game/aplikasi>")
+		s.ChannelMessageSend(m.ChannelID, "Format: `!play <nama game>` (Cek durasi main)")
 		return
 	}
-
-	totalSeconds, err := b.repository.GetActivityHours(m.Author.ID, name)
-	if err != nil {
-		log.Printf("Error getting activity hours: %v", err)
-	}
-
-	msg := fmt.Sprintf("🎮 %s, %s selama %s", m.Author.Username, name, utils.FormatDuration(totalSeconds))
-	s.ChannelMessageSend(m.ChannelID, msg)
+	totalSeconds, _ := b.repository.GetActivityHours(m.Author.ID, name)
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎮 %s, main %s selama %s", 
+		m.Author.Username, name, utils.FormatDuration(totalSeconds)))
 }
 
-// handleStatsCommand handles the !stats command
 func (b *Bot) handleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Get total voice hours for this guild
-	voiceSeconds, err := b.repository.GetVoiceHours(m.Author.ID, m.GuildID)
-	if err != nil {
-		log.Printf("Error getting voice hours: %v", err)
-	}
-
-	// Get top activities
-	activities, err := b.repository.GetTopActivities(m.Author.ID, 5)
-	if err != nil {
-		log.Printf("Error getting top activities: %v", err)
-		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil statistik.")
-		return
-	}
-
+	voiceSeconds, _ := b.repository.GetVoiceHours(m.Author.ID, m.GuildID)
+	activities, _ := b.repository.GetTopActivities(m.Author.ID, 5)
+	
 	var lines []string
-	for _, activity := range activities {
-		lines = append(lines, fmt.Sprintf("- %s: %s", activity.ActivityName, utils.FormatDuration(activity.TotalSeconds)))
+	for _, act := range activities {
+		lines = append(lines, fmt.Sprintf("• %s: %s", act.ActivityName, utils.FormatDuration(act.TotalSeconds)))
 	}
-
-	msg := fmt.Sprintf("📊 %s\nVoice (server ini): %s\nAktivitas teratas (global):\n%s",
+	
+	msg := fmt.Sprintf("📊 **Stats %s**\n🔊 Voice: %s\n🎮 Top Activities:\n%s", 
 		m.Author.Username, utils.FormatDuration(voiceSeconds), strings.Join(lines, "\n"))
 	s.ChannelMessageSend(m.ChannelID, msg)
 }
 
-// handleLeaderboardCommand handles the !leaderboard command
 func (b *Bot) handleLeaderboardCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	content := strings.TrimSpace(m.Content)
-	parts := strings.Fields(content)
-
+	parts := strings.Fields(m.Content)
 	if len(parts) < 2 {
-		s.ChannelMessageSend(m.ChannelID, "Format: !leaderboard voice | !leaderboard play <nama game>")
+		s.ChannelMessageSend(m.ChannelID, "Format: `!leaderboard voice` atau `!leaderboard play <game>`")
 		return
 	}
-
-	switch parts[1] {
-	case "voice":
-		b.handleVoiceLeaderboard(s, m)
-	case "play":
-		if len(parts) < 3 {
-			s.ChannelMessageSend(m.ChannelID, "Format: !leaderboard play <nama game>")
-			return
+	
+	if parts[1] == "voice" {
+		entries, _ := b.repository.GetVoiceLeaderboard(m.GuildID, 10)
+		var lines []string
+		for _, e := range entries {
+			lines = append(lines, fmt.Sprintf("%d. <@%s> - %s", e.Rank, e.UserID, utils.FormatDuration(e.TotalSeconds)))
 		}
-		gameName := strings.Join(parts[2:], " ")
-		b.handleActivityLeaderboard(s, m, gameName)
-	default:
-		s.ChannelMessageSend(m.ChannelID, "Format: !leaderboard voice | !leaderboard play <nama game>")
+		s.ChannelMessageSend(m.ChannelID, "🏆 **Voice Leaderboard**\n"+strings.Join(lines, "\n"))
+	} else if parts[1] == "play" && len(parts) >= 3 {
+		game := strings.Join(parts[2:], " ")
+		entries, _ := b.repository.GetActivityLeaderboard(game, 10)
+		var lines []string
+		for _, e := range entries {
+			lines = append(lines, fmt.Sprintf("%d. <@%s> - %s", e.Rank, e.UserID, utils.FormatDuration(e.TotalSeconds)))
+		}
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎮 **Leaderboard %s**\n%s", game, strings.Join(lines, "\n")))
 	}
-}
-
-// handleVoiceLeaderboard handles voice leaderboard
-func (b *Bot) handleVoiceLeaderboard(s *discordgo.Session, m *discordgo.MessageCreate) {
-	entries, err := b.repository.GetVoiceLeaderboard(m.GuildID, 10)
-	if err != nil {
-		log.Printf("Error getting voice leaderboard: %v", err)
-		s.ChannelMessageSend(m.ChannelID, "Terjadi kesalahan mengambil leaderboard voice.")
-		return
-	}
-
-	if len(entries) == 0 {
-		s.ChannelMessageSend(m.ChannelID, "Belum ada data voice untuk leaderboard.")
-		return
-	}
-
-	var lines []string
-	for _, entry := range entries {
-		userMention := utils.FormatUserMention(entry.UserID)
-		line := utils.FormatLeaderboardEntry(entry.Rank, userMention, utils.FormatDuration(entry.TotalSeconds))
-		lines = append(lines, line)
-	}
-
-	msg := fmt.Sprintf("🏆 **Voice Leaderboard** (Server ini)\n%s", strings.Join(lines, "\n"))
-	s.ChannelMessageSend(m.ChannelID, msg)
 }
 
 // handleActivityLeaderboard handles activity leaderboard
