@@ -129,7 +129,6 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 	}
 	s.ChannelMessageEditEmbed(m.ChannelID, loadingMsg.ID, embed)
 
-	// PERBAIKAN: Hanya cek nil, field .Ready sudah dihapus di library baru
 	if session.VoiceConn == nil {
 		if err := b.connectToVoice(s, m.GuildID, channelID); err != nil {
 			s.ChannelMessageSend(m.ChannelID, "❌ Gagal connect voice: "+err.Error())
@@ -200,6 +199,8 @@ func (b *Bot) searchYouTube(query string) (*MusicTrack, error) {
 
 // extractYouTubeInfo gets info from direct YouTube URL
 func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
+	// Kita pakai Library CUMA untuk metadata (Title/Thumbnail) karena cepat
+	// Tapi URL stream-nya nanti tetap pakai yt-dlp di playAudioStream
 	video, err := ytClient.GetVideo(url)
 	if err != nil {
 		return b.extractWithYtDlp(url)
@@ -233,103 +234,99 @@ func (b *Bot) extractWithYtDlp(url string) (*MusicTrack, error) {
 
 // playAudioStream is the core player function
 func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
-	// PERBAIKAN: Hanya cek nil, field .Ready sudah dihapus di library baru
 	if vc == nil {
 		return fmt.Errorf("voice connection not ready")
 	}
 
-	var streamURL string
-
-	// Attempt 1: Library
-	video, err := ytClient.GetVideo(url)
-	if err == nil {
-		formats := video.Formats.WithAudioChannels()
-		var format *youtube.Format
-		for _, f := range formats {
-			if f.ItagNo == 251 || strings.Contains(f.MimeType, "audio/webm") {
-				format = &f
-				break
-			}
-		}
-		if format == nil && len(formats) > 0 {
-			format = &formats[0]
-		}
-		if format != nil {
-			streamURL = format.URL
-			fmt.Printf("📺 [Library] Playing format: %s\n", format.MimeType)
-		}
+	// PERBAIKAN UTAMA: Hapus logika "Library Attempt"
+	// Langsung paksa pakai yt-dlp untuk streaming
+	fmt.Println("🔄 Mengambil stream URL via yt-dlp...")
+	
+	cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", url)
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("gagal mengambil audio source: %v", err)
 	}
-
-	// Attempt 2: Fallback yt-dlp
+	
+	streamURL := strings.TrimSpace(string(out))
 	if streamURL == "" {
-		fmt.Println("🔄 [Fallback] Menggunakan yt-dlp untuk audio stream...")
-		cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", url)
-		out, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("gagal total mengambil audio source: %v", err)
-		}
-		streamURL = strings.TrimSpace(string(out))
+		return fmt.Errorf("stream URL kosong dari yt-dlp")
 	}
 
-	if streamURL == "" {
-		return fmt.Errorf("stream URL kosong")
-	}
+	fmt.Println("✅ Stream URL didapatkan, memulai FFmpeg...")
 
 	// FFmpeg stream
-	cmd := exec.Command("ffmpeg",
+	ffmpegCmd := exec.Command("ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
 		"-i", streamURL,
-		"-re",
-		"-f", "s16le",
-		"-ar", "48000",
-		"-ac", "2",
-		"pipe:1",
+		"-re",          // Baca input sesuai native framerate (PENTING)
+		"-f", "s16le",  // Format PCM
+		"-ar", "48000", // 48kHz
+		"-ac", "2",     // Stereo
+		"pipe:1",       // Output ke stdout
 	)
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := ffmpegCmd.StdoutPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("gagal stdout pipe: %v", err)
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	defer cmd.Wait()
 
+	if err := ffmpegCmd.Start(); err != nil {
+		return fmt.Errorf("gagal start ffmpeg: %v", err)
+	}
+	defer ffmpegCmd.Wait()
+
+	// Opus Encoder
 	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
-		return err
+		return fmt.Errorf("gagal buat opus encoder: %v", err)
 	}
 
 	vc.Speaking(true)
 	defer vc.Speaking(false)
 
+	// Buffer setup (20ms frame)
 	frameSize := 960
-	pcmBuf := make([]byte, frameSize*2*2)
-	pcmInt16 := make([]int16, frameSize*2)
+	pcmBuf := make([]byte, frameSize*2*2) // 3840 bytes
+	pcmInt16 := make([]int16, frameSize*2) // 1920 ints
 
+	fmt.Println("▶️ Mulai mengirim paket audio ke Discord...")
+	
+	packetCount := 0
 	for {
 		_, err := io.ReadFull(stdout, pcmBuf)
 		if err == io.EOF {
+			fmt.Println("⏹️ Audio stream selesai (EOF)")
 			break
 		}
 		if err != nil {
-			log.Printf("Error reading ffmpeg stdout: %v", err)
+			log.Printf("❌ Error reading ffmpeg: %v", err)
 			break
 		}
 
+		// Baca binary ke int16
 		if err := binary.Read(bytes.NewReader(pcmBuf), binary.LittleEndian, pcmInt16); err != nil {
+			log.Printf("❌ Error decoding PCM: %v", err)
 			continue
 		}
 
+		// Encode ke Opus
 		opusData, err := encoder.Encode(pcmInt16, frameSize, frameSize*2)
 		if err != nil {
+			log.Printf("❌ Error encoding Opus: %v", err)
 			continue
 		}
 
+		// Kirim ke Discord Voice Connection
 		select {
 		case vc.OpusSend <- opusData:
+			packetCount++
+			if packetCount % 250 == 0 { // Log setiap ~5 detik (250 * 20ms)
+				fmt.Printf("📡 Streaming... (%d packets)\r", packetCount)
+			}
 		case <-time.After(1 * time.Second):
+			log.Println("⚠️ Timeout sending opus packet")
 			continue
 		}
 	}
@@ -373,14 +370,10 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 	s.ChannelMessageSend(session.Queue.Tracks[0].ChannelID, "⏹️ Queue selesai.")
 }
 
-// PERBAIKAN: connectToVoice menggunakan Context dan menghapus loop manual
 func (b *Bot) connectToVoice(s *discordgo.Session, guildID, channelID string) error {
-	// Gunakan context dengan timeout 10 detik agar tidak hang selamanya
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Argument pertama sekarang butuh Context.
-	// Fungsi ini sekarang blocking (menunggu koneksi siap), jadi tidak perlu loop pengecekan manual.
 	vc, err := s.ChannelVoiceJoin(ctx, guildID, channelID, false, true)
 	if err != nil {
 		return fmt.Errorf("gagal join voice channel: %w", err)
@@ -425,7 +418,6 @@ func (b *Bot) handleStopCommand(s *discordgo.Session, m *discordgo.MessageCreate
 	session.Queue.IsPlaying = false
 	
 	if session.VoiceConn != nil {
-		// PERBAIKAN: Disconnect butuh context
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		session.VoiceConn.Disconnect(ctx)
