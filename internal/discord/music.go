@@ -232,52 +232,64 @@ func (b *Bot) extractWithYtDlp(url string) (*MusicTrack, error) {
 	}, nil
 }
 
-// playAudioStream is the core player function
+// playAudioStream streams audio by piping yt-dlp output directly to ffmpeg
 func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 	if vc == nil {
 		return fmt.Errorf("voice connection not ready")
 	}
 
-	// PERBAIKAN UTAMA: Hapus logika "Library Attempt"
-	// Langsung paksa pakai yt-dlp untuk streaming
-	fmt.Println("🔄 Mengambil stream URL via yt-dlp...")
-	
-	cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", url)
-	out, err := cmd.Output()
+	fmt.Println("🔄 Menggunakan strategi Direct Pipe (yt-dlp -> ffmpeg)...")
+
+	// 1. Siapkan command yt-dlp untuk download ke STDOUT ("-o -")
+	// Kita gunakan format bestaudio dan buffer yang cukup
+	ytCmd := exec.Command("yt-dlp", 
+		"-f", "bestaudio", 
+		"-o", "-",      // Output ke stdout
+		"--quiet",      // Jangan nyampah di log
+		url,
+	)
+
+	// Ambil stdout dari yt-dlp (ini isinya data audio mentah)
+	ytOut, err := ytCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("gagal mengambil audio source: %v", err)
-	}
-	
-	streamURL := strings.TrimSpace(string(out))
-	if streamURL == "" {
-		return fmt.Errorf("stream URL kosong dari yt-dlp")
+		return fmt.Errorf("gagal membuat pipe yt-dlp: %v", err)
 	}
 
-	fmt.Println("✅ Stream URL didapatkan, memulai FFmpeg...")
-
-	// FFmpeg stream
+	// 2. Siapkan command ffmpeg untuk baca dari STDIN ("pipe:0")
 	ffmpegCmd := exec.Command("ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
-		"-i", streamURL,
-		"-re",          // Baca input sesuai native framerate (PENTING)
-		"-f", "s16le",  // Format PCM
+		"-i", "pipe:0", // Baca dari pipe (yt-dlp)
+		"-f", "s16le",  // Format PCM untuk Discord
 		"-ar", "48000", // 48kHz
 		"-ac", "2",     // Stereo
-		"pipe:1",       // Output ke stdout
+		"pipe:1",       // Output ke stdout (untuk dibaca Go)
 	)
 
-	stdout, err := ffmpegCmd.StdoutPipe()
+	// Sambungkan output yt-dlp ke input ffmpeg
+	ffmpegCmd.Stdin = ytOut
+
+	// Ambil stdout dari ffmpeg (ini isinya PCM audio matang)
+	ffmpegOut, err := ffmpegCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("gagal stdout pipe: %v", err)
+		return fmt.Errorf("gagal membuat pipe ffmpeg: %v", err)
 	}
 
+	// 3. Jalankan kedua command
+	if err := ytCmd.Start(); err != nil {
+		return fmt.Errorf("gagal start yt-dlp: %v", err)
+	}
 	if err := ffmpegCmd.Start(); err != nil {
 		return fmt.Errorf("gagal start ffmpeg: %v", err)
 	}
-	defer ffmpegCmd.Wait()
 
-	// Opus Encoder
+	// Pastikan proses dibersihkan saat fungsi selesai
+	defer func() {
+		ytCmd.Process.Kill()
+		ffmpegCmd.Process.Kill()
+	}()
+
+	// 4. Siapkan Encoder Opus
 	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		return fmt.Errorf("gagal buat opus encoder: %v", err)
@@ -288,43 +300,38 @@ func (b *Bot) playAudioStream(vc *discordgo.VoiceConnection, url string) error {
 
 	// Buffer setup (20ms frame)
 	frameSize := 960
-	pcmBuf := make([]byte, frameSize*2*2) // 3840 bytes
-	pcmInt16 := make([]int16, frameSize*2) // 1920 ints
+	pcmBuf := make([]byte, frameSize*2*2)
+	pcmInt16 := make([]int16, frameSize*2)
 
-	fmt.Println("▶️ Mulai mengirim paket audio ke Discord...")
-	
-	packetCount := 0
+	fmt.Println("▶️ Streaming dimulai...")
+
 	for {
-		_, err := io.ReadFull(stdout, pcmBuf)
+		// Baca data dari output FFmpeg
+		_, err := io.ReadFull(ffmpegOut, pcmBuf)
 		if err == io.EOF {
-			fmt.Println("⏹️ Audio stream selesai (EOF)")
+			fmt.Println("⏹️ Lagu selesai (EOF)")
 			break
 		}
 		if err != nil {
-			log.Printf("❌ Error reading ffmpeg: %v", err)
+			log.Printf("❌ Error reading ffmpeg stream: %v", err)
 			break
 		}
 
-		// Baca binary ke int16
+		// Convert bytes to int16
 		if err := binary.Read(bytes.NewReader(pcmBuf), binary.LittleEndian, pcmInt16); err != nil {
-			log.Printf("❌ Error decoding PCM: %v", err)
 			continue
 		}
 
 		// Encode ke Opus
 		opusData, err := encoder.Encode(pcmInt16, frameSize, frameSize*2)
 		if err != nil {
-			log.Printf("❌ Error encoding Opus: %v", err)
 			continue
 		}
 
-		// Kirim ke Discord Voice Connection
+		// Kirim ke Discord
 		select {
 		case vc.OpusSend <- opusData:
-			packetCount++
-			if packetCount % 250 == 0 { // Log setiap ~5 detik (250 * 20ms)
-				fmt.Printf("📡 Streaming... (%d packets)\r", packetCount)
-			}
+			// Berhasil kirim
 		case <-time.After(1 * time.Second):
 			log.Println("⚠️ Timeout sending opus packet")
 			continue
