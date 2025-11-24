@@ -25,3 +25,5 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 )
+
+replace github.com/bwmarrin/discordgo => github.com/ozraru/discordgo v0.26.2-0.20251101184423-6792228f3271
