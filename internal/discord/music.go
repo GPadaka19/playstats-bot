@@ -59,7 +59,7 @@ type MusicSession struct {
 var (
 	ytClient      = youtube.Client{}
 	musicSessions = make(map[string]*MusicSession)
-	sessionsMu    sync.Mutex // Lock global map
+	sessionsMu    sync.Mutex
 )
 
 // handleMusicCommand handles music commands with bot mention
@@ -72,22 +72,19 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	content = strings.ReplaceAll(content, "<@!"+botUserID+">", "")
 	content = strings.TrimSpace(content)
 
+	// Jika cuma tag @Bot tanpa command, tampilkan help
 	if content == "" {
-		s.ChannelMessageSend(m.ChannelID, "🎵 **Music Bot Commands**\n"+
-			"• `@bot [judul/URL]` - Play Music\n"+
-			"• `@bot skip` - Lewati lagu\n"+
-			"• `@bot pause` / `resume` - Jeda/Lanjut\n"+
-			"• `@bot stop` - Stop & Clear Queue (Auto-leave 30s)\n"+
-			"• `@bot leave` - Paksa keluar sekarang\n"+
-			"• `@bot queue` - Lihat antrian")
+		b.handleHelpCommand(s, m)
 		return
 	}
 
-	// Check voice state
-	voiceState, err := s.State.VoiceState(m.GuildID, m.Author.ID)
-	if err != nil || voiceState == nil {
-		s.ChannelMessageSend(m.ChannelID, "❌ Masuk voice channel dulu bang!")
-		return
+	// Check voice state (kecuali untuk help)
+	if !strings.EqualFold(content, "help") {
+		voiceState, err := s.State.VoiceState(m.GuildID, m.Author.ID)
+		if err != nil || voiceState == nil {
+			s.ChannelMessageSend(m.ChannelID, "❌ Masuk voice channel dulu bang!")
+			return
+		}
 	}
 
 	parts := strings.Fields(content)
@@ -96,8 +93,9 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	}
 	command := strings.ToLower(parts[0])
 
-	// Route commands
 	switch command {
+	case "help":
+		b.handleHelpCommand(s, m)
 	case "skip":
 		b.handleSkipCommand(s, m)
 	case "stop":
@@ -115,8 +113,26 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	case "volume":
 		b.handleVolumeCommand(s, m, parts)
 	default:
-		b.handlePlayMusic(s, m, content, voiceState.ChannelID)
+		b.handlePlayMusic(s, m, content, "") // Channel ID akan diambil otomatis dari voice state user di handlePlayMusic jika kosong, tapi di atas sudah kita cek voice state
+		// Ambil channel ID user lagi untuk play
+		vs, _ := s.State.VoiceState(m.GuildID, m.Author.ID)
+		if vs != nil {
+			b.handlePlayMusic(s, m, content, vs.ChannelID)
+		}
 	}
+}
+
+// handleHelpCommand displays the help message
+func (b *Bot) handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	s.ChannelMessageSend(m.ChannelID, "🎵 **Music Bot Commands**\n"+
+		"• `@bot [judul/URL]` - Putar lagu (YouTube/Spotify)\n"+
+		"• `@bot skip` - Lewati lagu saat ini\n"+
+		"• `@bot pause` / `resume` - Jeda atau lanjut lagu\n"+
+		"• `@bot stop` - Stop & bersihkan queue (Auto-leave dalam 30d)\n"+
+		"• `@bot leave` - Paksa bot keluar channel\n"+
+		"• `@bot queue` - Lihat daftar antrian\n"+
+		"• `@bot loop` - Aktifkan/matikan mode ulang\n"+
+		"• `@bot help` - Tampilkan pesan ini")
 }
 
 // handlePlayMusic handles playing music logic
@@ -134,15 +150,12 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 
 	session := b.getOrCreateMusicSession(m.GuildID)
 	
-	// Lock session untuk update queue dan timer
 	session.Mu.Lock()
-	
 	// Matikan idle timer jika ada karena kita mau main lagu
 	if session.IdleTimer != nil {
 		session.IdleTimer.Stop()
 		session.IdleTimer = nil
 	}
-
 	session.Queue.Tracks = append(session.Queue.Tracks, *track)
 	session.Mu.Unlock()
 
@@ -158,7 +171,6 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 	}
 	s.ChannelMessageEditEmbed(m.ChannelID, loadingMsg.ID, embed)
 
-	// Connect if needed
 	if session.VoiceConn == nil {
 		if err := b.connectToVoice(s, m.GuildID, channelID); err != nil {
 			s.ChannelMessageSend(m.ChannelID, "❌ Gagal connect voice: "+err.Error())
@@ -178,12 +190,12 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 
 	for {
 		session.Mu.Lock()
-		// Cek apakah queue sudah habis atau indeks di luar batas
+		// Cek apakah queue kosong
 		if len(session.Queue.Tracks) == 0 || session.Queue.Current >= len(session.Queue.Tracks) {
 			session.Queue.IsPlaying = false
 			session.Mu.Unlock()
 			
-			// Queue selesai, mulai hitung mundur 30 detik untuk leave
+			// Queue selesai, mulai timer idle 30 detik
 			b.startIdleTimer(s, guildID)
 			return
 		}
@@ -203,14 +215,14 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 			Color:       0x00ff00,
 		})
 
-		// Play Audio (Blocking sampai lagu selesai atau di-cancel)
+		// Play Audio (Blocking)
 		err := b.playAudioStream(ctx, session, track.URL)
 		if err != nil && err != context.Canceled {
 			log.Printf("Playback Error: %v", err)
 			s.ChannelMessageSend(track.ChannelID, "⚠️ Gagal memutar lagu, skip ke selanjutnya...")
 		}
 
-		// Cleanup setelah lagu selesai
+		// Cleanup
 		session.Mu.Lock()
 		session.StreamCancel = nil
 		session.FfmpegProc = nil
@@ -228,7 +240,7 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 	}
 }
 
-// startIdleTimer memulai timer 30 detik untuk keluar dari channel
+// startIdleTimer memulai timer 30 detik untuk keluar
 func (b *Bot) startIdleTimer(s *discordgo.Session, guildID string) {
 	session := b.getOrCreateMusicSession(guildID)
 	session.Mu.Lock()
@@ -241,7 +253,6 @@ func (b *Bot) startIdleTimer(s *discordgo.Session, guildID string) {
 	// Set timer 30 detik
 	session.IdleTimer = time.AfterFunc(30*time.Second, func() {
 		session.Mu.Lock()
-		// Cek lagi apakah sedang main lagu? (Jaga-jaga race condition)
 		if session.Queue.IsPlaying {
 			session.Mu.Unlock()
 			return
@@ -250,7 +261,7 @@ func (b *Bot) startIdleTimer(s *discordgo.Session, guildID string) {
 		conn := session.VoiceConn
 		session.VoiceConn = nil
 		session.IdleTimer = nil
-		session.Queue.Tracks = nil // Reset queue
+		session.Queue.Tracks = nil
 		session.Queue.Current = 0
 		session.Mu.Unlock()
 
@@ -263,7 +274,7 @@ func (b *Bot) startIdleTimer(s *discordgo.Session, guildID string) {
 	})
 }
 
-// playAudioStream streams audio (Revised with Pause/Resume support)
+// playAudioStream streams audio (Direct Pipe yt-dlp -> ffmpeg)
 func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url string) error {
 	if session.VoiceConn == nil {
 		return fmt.Errorf("voice connection not ready")
@@ -291,7 +302,6 @@ func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url st
 		return err
 	}
 
-	// Start commands
 	if err := ytCmd.Start(); err != nil {
 		return err
 	}
@@ -299,18 +309,15 @@ func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url st
 		return err
 	}
 
-	// Simpan process FFmpeg ke session untuk fitur Pause
 	session.Mu.Lock()
 	session.FfmpegProc = ffmpegCmd.Process
 	session.Mu.Unlock()
 
 	defer func() {
-		// Cleanup process
 		if ytCmd.Process != nil { ytCmd.Process.Kill() }
 		if ffmpegCmd.Process != nil { ffmpegCmd.Process.Kill() }
 	}()
 
-	// Opus Encoder
 	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
 	if err != nil {
 		return err
@@ -323,25 +330,21 @@ func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url st
 	pcmBuf := make([]byte, frameSize*2*2)
 	pcmInt16 := make([]int16, frameSize*2)
 
-	// Streaming Loop
 	for {
-		// Cek apakah context dibatalkan (Skip/Stop)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Baca audio
 		_, err := io.ReadFull(ffmpegOut, pcmBuf)
 		if err == io.EOF {
-			return nil // Lagu selesai normal
+			return nil
 		}
 		if err != nil {
 			return err
 		}
 
-		// Encode
 		if err := binary.Read(bytes.NewReader(pcmBuf), binary.LittleEndian, pcmInt16); err != nil {
 			continue
 		}
@@ -350,11 +353,9 @@ func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url st
 			continue
 		}
 
-		// Kirim
 		select {
 		case session.VoiceConn.OpusSend <- opusData:
 		case <-time.After(1 * time.Second):
-			// Network lag? skip frame
 		}
 	}
 }
@@ -367,7 +368,7 @@ func (b *Bot) handleSkipCommand(s *discordgo.Session, m *discordgo.MessageCreate
 	defer session.Mu.Unlock()
 
 	if session.StreamCancel != nil {
-		session.StreamCancel() // Batalkan context lagu saat ini -> Trigger next song
+		session.StreamCancel()
 		s.ChannelMessageSend(m.ChannelID, "⏭️ Skipped.")
 	} else {
 		s.ChannelMessageSend(m.ChannelID, "❌ Tidak ada lagu yang sedang diputar.")
@@ -380,11 +381,10 @@ func (b *Bot) handlePauseCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	defer session.Mu.Unlock()
 
 	if session.FfmpegProc != nil {
-		// Kirim sinyal SIGSTOP (Pause process di Linux)
 		if err := session.FfmpegProc.Signal(syscall.SIGSTOP); err == nil {
 			s.ChannelMessageSend(m.ChannelID, "⏸️ Paused.")
 		} else {
-			s.ChannelMessageSend(m.ChannelID, "❌ Gagal pause (mungkin OS tidak support).")
+			s.ChannelMessageSend(m.ChannelID, "❌ Gagal pause.")
 		}
 	}
 }
@@ -395,7 +395,6 @@ func (b *Bot) handleResumeCommand(s *discordgo.Session, m *discordgo.MessageCrea
 	defer session.Mu.Unlock()
 
 	if session.FfmpegProc != nil {
-		// Kirim sinyal SIGCONT (Resume process di Linux)
 		if err := session.FfmpegProc.Signal(syscall.SIGCONT); err == nil {
 			s.ChannelMessageSend(m.ChannelID, "▶️ Resumed.")
 		} else {
@@ -409,24 +408,18 @@ func (b *Bot) handleStopCommand(s *discordgo.Session, m *discordgo.MessageCreate
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
 
-	// Kosongkan queue
 	session.Queue.Tracks = nil
 	session.Queue.Current = 0
-	
-	// Matikan stream saat ini
 	if session.StreamCancel != nil {
 		session.StreamCancel()
 	}
-	
 	s.ChannelMessageSend(m.ChannelID, "⏹️ Stopped. (Bot akan keluar dalam 30 detik jika idle)")
-	// Idle timer akan otomatis berjalan karena startMusicPlayer loop akan selesai
 }
 
 func (b *Bot) handleLeaveCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	session := b.getOrCreateMusicSession(m.GuildID)
 	session.Mu.Lock()
 	
-	// Bersihkan semua
 	session.Queue.Tracks = nil
 	if session.StreamCancel != nil {
 		session.StreamCancel()
@@ -437,7 +430,7 @@ func (b *Bot) handleLeaveCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	
 	conn := session.VoiceConn
 	session.VoiceConn = nil
-	session.Mu.Unlock() // Unlock sebelum disconnect agar tidak deadlock
+	session.Mu.Unlock()
 
 	if conn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -482,8 +475,6 @@ func (b *Bot) getOrCreateMusicSession(guildID string) *MusicSession {
 	return musicSessions[guildID]
 }
 
-// --- Utilities & Other Commands (No Changes Needed for Logic, but included for completeness) ---
-
 func (b *Bot) extractMusicInfo(query string) (*MusicTrack, error) {
 	if b.isYouTubeURL(query) { return b.extractYouTubeInfo(query) }
 	if b.isSpotifyURL(query) { return b.extractSpotifyInfo(query) }
@@ -495,7 +486,7 @@ func (b *Bot) isYouTubeURL(url string) bool {
 }
 
 func (b *Bot) isSpotifyURL(url string) bool {
-	return strings.Contains(url, "spotify.com") || strings.Contains(url, "open.spotify.com")
+	return strings.Contains(url, "spotify.com") || strings.Contains(url, "open.spotify.com") || strings.Contains(url, "open.spotify.com")
 }
 
 func (b *Bot) extractSpotifyInfo(url string) (*MusicTrack, error) {
