@@ -26,12 +26,8 @@ func New(clientID, clientSecret string) (*Client, error) {
 		ClientSecret: clientSecret,
 		TokenURL:     spotifyauth.TokenURL,
 	}
-	token, err := config.Token(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get spotify token: %w", err)
-	}
+	httpClient := config.Client(ctx)
 
-	httpClient := spotifyauth.New().Client(ctx, token)
 	client := spotify.New(httpClient)
 
 	return &Client{api: client}, nil
