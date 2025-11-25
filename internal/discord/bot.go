@@ -57,6 +57,7 @@ func New(cfg *config.Config, repository *database.Repository) (*Bot, error) {
 	session.AddHandler(bot.voiceStateUpdate)
 	session.AddHandler(bot.messageCreate)
 	session.AddHandler(bot.presenceUpdate)
+	session.AddHandler(bot.interactionCreate)
 
 	return bot, nil
 }
@@ -74,6 +75,14 @@ func (b *Bot) Start() error {
 // Stop stops the bot
 func (b *Bot) Stop() error {
 	return b.session.Close()
+}
+
+// Handler Interaksi (Klik Dropdown/Button)
+func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type == discordgo.InteractionMessageComponent {
+		// Lempar ke music.go untuk diproses
+		b.handleSearchInteraction(s, i)
+	}
 }
 
 // messageCreate handles message creation events

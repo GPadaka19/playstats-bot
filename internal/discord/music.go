@@ -127,123 +127,150 @@ func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 	query := strings.Join(parts[1:], " ")
-	s.ChannelMessageSend(m.ChannelID, "🔍 Mencari 10 lagu teratas...")
+	s.ChannelMessageSend(m.ChannelID, "🔍 Mencari...")
 
-	// Cari 10 lagu via yt-dlp
+	// Cari 10 lagu
 	tracks, err := b.searchYouTubeList(query)
 	if err != nil {
 		s.ChannelMessageSend(m.ChannelID, "❌ Gagal mencari: "+err.Error())
 		return
 	}
 
-	// Simpan session pencarian user ini
+	// Simpan hasil pencarian sementara (untuk diambil saat user klik menu)
 	searchMu.Lock()
 	searchSessions[m.Author.ID] = tracks
 	searchMu.Unlock()
 
-	// Tampilkan Embed
-	var desc strings.Builder
+	// Buat Opsi Dropdown
+	var options []discordgo.SelectMenuOption
 	for i, t := range tracks {
-		desc.WriteString(fmt.Sprintf("`%d.` %s (%s)\n", i+1, t.Title, t.Duration))
+		label := t.Title
+		if len(label) > 95 { label = label[:92] + "..." } // Batas karakter label
+		
+		options = append(options, discordgo.SelectMenuOption{
+			Label:       fmt.Sprintf("%d. %s", i+1, label),
+			Value:       fmt.Sprintf("%d", i), // Value adalah index
+			Description: fmt.Sprintf("Durasi: %s", t.Duration.String()),
+		})
 	}
-	desc.WriteString("\n**Ketik angka 1-10 untuk memilih, atau `cancel` untuk batal.**")
 
-	s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
-		Title:       "🔍 Hasil Pencarian: " + query,
-		Description: desc.String(),
-		Color:       0x00ff00,
-	})
+	// Buat Komponen (Dropdown + Tombol Cancel)
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					CustomID:    "search_select",
+					Placeholder: "Pilih lagu untuk diputar...",
+					Options:     options,
+				},
+			},
+		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "Batal",
+					Style:    discordgo.DangerButton,
+					CustomID: "search_cancel",
+				},
+			},
+		},
+	}
 
-	// Hapus session setelah 30 detik (Timeout)
-	time.AfterFunc(30*time.Second, func() {
-		searchMu.Lock()
-		if _, ok := searchSessions[m.Author.ID]; ok {
-			delete(searchSessions, m.Author.ID)
-		}
-		searchMu.Unlock()
-	})
-}
+	// Kirim Pesan Interaktif
+	msg := &discordgo.MessageSend{
+		Content: "🔍 **Hasil Pencarian:** Silakan pilih di bawah ini.",
+		Components: components,
+	}
+	s.ChannelMessageSendComplex(m.ChannelID, msg)
 
-// Fungsi ini dipanggil oleh bot.go jika user mengetik angka
-func (b *Bot) handleSearchSelection(s *discordgo.Session, m *discordgo.MessageCreate) bool {
-	searchMu.Lock()
-	tracks, ok := searchSessions[m.Author.ID]
-	searchMu.Unlock()
-
-	if !ok { return false } // Bukan response search
-
-	content := strings.TrimSpace(m.Content)
-	
-	if strings.ToLower(content) == "cancel" {
+	// Hapus session setelah 1 menit (cleanup)
+	time.AfterFunc(60*time.Second, func() {
 		searchMu.Lock()
 		delete(searchSessions, m.Author.ID)
 		searchMu.Unlock()
-		s.ChannelMessageSend(m.ChannelID, "❌ Pencarian dibatalkan.")
-		return true
-	}
-
-	// Cek apakah angka valid
-	choice, err := strconv.Atoi(content)
-	if err != nil || choice < 1 || choice > len(tracks) {
-		// Jika user ngetik chat biasa, abaikan saja (biar tidak ganggu)
-		return false
-	}
-
-	// Pilih lagu
-	selected := tracks[choice-1]
-	
-	// Bersihkan session
-	searchMu.Lock()
-	delete(searchSessions, m.Author.ID)
-	searchMu.Unlock()
-
-	// Mainkan lagu (Mirip logika handlePlayMusic tapi dipotong)
-	session := b.getOrCreateMusicSession(m.GuildID)
-	selected.Requester = m.Author.Username
-	selected.ChannelID = m.ChannelID
-	
-	// Cek voice state untuk ambil channel ID (karena handleSearchCommand tidak ngecek voice)
-	vs, _ := s.State.VoiceState(m.GuildID, m.Author.ID)
-	if vs == nil {
-		s.ChannelMessageSend(m.ChannelID, "❌ Masuk voice channel dulu bang!")
-		return true
-	}
-
-	session.Mu.Lock()
-	if session.IdleTimer != nil {
-		session.IdleTimer.Stop()
-		session.IdleTimer = nil
-	}
-	session.Queue.Tracks = append(session.Queue.Tracks, selected)
-	queuePos := len(session.Queue.Tracks)
-	session.Mu.Unlock()
-
-	s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
-		Title:       "✅ Ditambahkan ke Queue",
-		Description: fmt.Sprintf("[%s](%s)", selected.Title, selected.URL),
-		Fields: []*discordgo.MessageEmbedField{
-			{Name: "Posisi", Value: fmt.Sprintf("#%d", queuePos), Inline: true},
-		},
-		Color:       0x00ff00,
-		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: selected.Thumbnail},
 	})
+}
 
-	if session.VoiceConn == nil {
-		if err := b.connectToVoice(s, m.GuildID, vs.ChannelID); err != nil {
-			s.ChannelMessageSend(m.ChannelID, "❌ Gagal connect voice: "+err.Error())
-			return true
+// Fungsi ini dipanggil dari bot.go saat user klik menu
+func (b *Bot) handleSearchInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Ambil User ID (bisa dari Member jika di server, User jika di DM)
+	userID := ""; if i.Member != nil { userID = i.Member.User.ID } else { userID = i.User.ID }
+
+	// Cek Tombol Cancel
+	if i.MessageComponentData().CustomID == "search_cancel" {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ Pencarian dibatalkan.", Components: []discordgo.MessageComponent{},
+			},
+		})
+		searchMu.Lock(); delete(searchSessions, userID); searchMu.Unlock()
+		return
+	}
+
+	// Cek Pilihan Menu
+	if i.MessageComponentData().CustomID == "search_select" {
+		values := i.MessageComponentData().Values
+		if len(values) == 0 { return }
+
+		idx, _ := strconv.Atoi(values[0]) // Ambil index pilihan
+
+		searchMu.Lock()
+		tracks, ok := searchSessions[userID]
+		delete(searchSessions, userID) // Bersihkan session setelah pilih
+		searchMu.Unlock()
+
+		if !ok || idx >= len(tracks) {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{Content: "⚠️ Sesi pencarian kadaluwarsa. Cari ulang ya!", Flags: discordgo.MessageFlagsEphemeral},
+			})
+			return
+		}
+
+		selected := tracks[idx]
+		
+		// Cek Voice
+		vs, _ := s.State.VoiceState(i.GuildID, userID)
+		if vs == nil {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{Content: "❌ Masuk voice channel dulu!", Flags: discordgo.MessageFlagsEphemeral},
+			})
+			return
+		}
+
+		// Masukkan ke Queue
+		session := b.getOrCreateMusicSession(i.GuildID)
+		selected.Requester = i.Member.User.Username // atau i.User.Username
+		selected.ChannelID = i.ChannelID
+
+		session.Mu.Lock()
+		if session.IdleTimer != nil { session.IdleTimer.Stop(); session.IdleTimer = nil }
+		session.Queue.Tracks = append(session.Queue.Tracks, selected)
+		session.Mu.Unlock()
+
+		// Update Pesan Menu jadi "Terpilih"
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("✅ **%s** ditambahkan ke antrian!", selected.Title),
+				Components: []discordgo.MessageComponent{}, // Hapus menu
+			},
+		})
+
+		// Connect & Play
+		if session.VoiceConn == nil {
+			if err := b.connectToVoice(s, i.GuildID, vs.ChannelID); err != nil { return }
+		}
+		if !session.Queue.IsPlaying {
+			go b.startMusicPlayer(s, i.GuildID)
 		}
 	}
-
-	if !session.Queue.IsPlaying {
-		go b.startMusicPlayer(s, m.GuildID)
-	}
-
-	return true // Handled
 }
 
 func (b *Bot) searchYouTubeList(query string) ([]*MusicTrack, error) {
-	// ytsearch10: cari 10 hasil
+	// ytsearch10 = Cari 10 hasil
 	cmd := exec.Command("yt-dlp", "ytsearch10:"+query, "--print", "%(id)s\t%(title)s\t%(duration)s", "--no-playlist")
 	output, err := cmd.Output()
 	if err != nil { return nil, err }
@@ -261,7 +288,7 @@ func (b *Bot) searchYouTubeList(query string) ([]*MusicTrack, error) {
 
 		tracks = append(tracks, &MusicTrack{
 			Title:    parts[1],
-			URL:      "https://www.youtube.com/watch?v=" + parts[0], // Original URL
+			URL:      "https://www.youtube.com/watch?v=" + parts[0],
 			Duration: time.Duration(durationSec) * time.Second,
 			Thumbnail: "https://img.youtube.com/vi/" + parts[0] + "/hqdefault.jpg",
 		})
