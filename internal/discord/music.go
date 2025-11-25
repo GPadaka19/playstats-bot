@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -430,7 +431,27 @@ func (b *Bot) handleLoopCommand(s *discordgo.Session, m *discordgo.MessageCreate
 	s.ChannelMessageSend(m.ChannelID, "🔁 Loop: "+state)
 }
 
-func (b *Bot) handleVolumeCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {}
+func (b *Bot) handleVolumeCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
+	if len(parts) < 2 {
+		s.ChannelMessageSend(m.ChannelID, "❌ Format: `@bot volume [0-100]`")
+		return
+	}
+
+	// 1. Parsing angka
+	vol, err := strconv.Atoi(parts[1])
+	if err != nil || vol < 0 || vol > 100 {
+		s.ChannelMessageSend(m.ChannelID, "❌ Masukkan angka volume antara 0 sampai 100.")
+		return
+	}
+
+	// 2. Simpan ke Session
+	session := b.getOrCreateMusicSession(m.GuildID)
+	session.Mu.Lock()
+	session.Queue.Volume = float64(vol) / 100.0 // Ubah jadi float 0.0 - 1.0
+	session.Mu.Unlock()
+
+	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔊 Volume diatur ke **%d%%**", vol))
+}
 
 func (b *Bot) startIdleTimer(s *discordgo.Session, guildID string) {
 	session := b.getOrCreateMusicSession(guildID)
