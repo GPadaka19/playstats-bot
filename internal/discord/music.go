@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +24,13 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/kkdai/youtube/v2"
 )
+
+
+type LyricsResult struct {
+	PlainLyrics string `json:"plainLyrics"`
+	TrackName   string `json:"trackName"`
+	ArtistName  string `json:"artistName"`
+}
 
 type MusicTrack struct {
 	Title     string
@@ -54,7 +65,6 @@ var (
 )
 
 // --- HANDLER UTAMA ---
-
 func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	content := strings.TrimSpace(m.Content)
 	botUserID := s.State.User.ID
@@ -73,8 +83,7 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 		command = strings.ToLower(parts[0])
 	}
 
-	// Cek Voice State (Kecuali command help)
-	if command != "help" {
+	if command != "help" && command != "h" {
 		voiceState, err := s.State.VoiceState(m.GuildID, m.Author.ID)
 		if err != nil || voiceState == nil {
 			s.ChannelMessageSend(m.ChannelID, "❌ Masuk voice channel dulu bang!")
@@ -83,7 +92,7 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	}
 
 	switch command {
-	case "help":
+	case "help", "h": // Alias h
 		b.handleHelpCommand(s, m)
 	case "skip":
 		b.handleSkipCommand(s, m)
@@ -91,7 +100,7 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 		b.handleStopCommand(s, m)
 	case "leave":
 		b.handleLeaveCommand(s, m)
-	case "queue":
+	case "queue", "q": // Alias q
 		b.handleQueueCommand(s, m)
 	case "pause":
 		b.handlePauseCommand(s, m)
@@ -101,13 +110,86 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 		b.handleLoopCommand(s, m)
 	case "volume":
 		b.handleVolumeCommand(s, m, parts)
+	case "lyrics", "l": // Fitur Lirik & Alias l
+		b.handleLyricsCommand(s, m)
 	default:
 		b.handlePlayMusic(s, m, content, "")
 	}
 }
 
-// --- LOGIC PLAYLIST & PLAY ---
+// --- FITUR LIRIK ---
 
+func (b *Bot) handleLyricsCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	session := b.getOrCreateMusicSession(m.GuildID)
+	session.Mu.Lock()
+	// Cek apakah ada lagu yang sedang diputar
+	if len(session.Queue.Tracks) == 0 || session.Queue.Current >= len(session.Queue.Tracks) {
+		session.Mu.Unlock()
+		s.ChannelMessageSend(m.ChannelID, "❌ Tidak ada lagu yang sedang diputar.")
+		return
+	}
+	currentTrack := session.Queue.Tracks[session.Queue.Current]
+	session.Mu.Unlock()
+
+	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔍 Mencari lirik untuk: **%s**...", currentTrack.Title))
+
+	// Bersihkan judul lagu agar pencarian lebih akurat
+	// Hapus (Official Video), [Lyrics], dll
+	cleanTitle := cleanTrackTitle(currentTrack.Title)
+	
+	lyrics, err := fetchLyrics(cleanTitle)
+	if err != nil {
+		s.ChannelMessageEdit(m.ChannelID, loadingMsg.ID, "❌ Maaf, lirik tidak ditemukan.")
+		return
+	}
+
+	// Kirim Lirik (Potong jika terlalu panjang untuk Embed)
+	if len(lyrics) > 4000 {
+		lyrics = lyrics[:3990] + "..."
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "🎤 Lirik: " + currentTrack.Title,
+		Description: lyrics,
+		Color:       0x3498db, // Biru
+		Footer:      &discordgo.MessageEmbedFooter{Text: "Source: Lrclib.net"},
+	}
+	
+	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
+	s.ChannelMessageSendEmbed(m.ChannelID, embed)
+}
+
+func fetchLyrics(query string) (string, error) {
+	// API Request ke Lrclib
+	apiURL := fmt.Sprintf("https://lrclib.net/api/search?q=%s", url.QueryEscape(query))
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var results []LyricsResult
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return "", err
+	}
+
+	if len(results) == 0 {
+		return "", fmt.Errorf("not found")
+	}
+
+	// Ambil hasil pertama
+	return results[0].PlainLyrics, nil
+}
+
+func cleanTrackTitle(title string) string {
+	// Regex untuk menghapus teks sampah di judul YouTube
+	// Contoh: "Linkin Park - Numb (Official Video)" -> "Linkin Park - Numb"
+	re := regexp.MustCompile(`(?i)(\(.*\)|\[.*\]|official|video|audio|lyrics|lyric|mv|music video|hd|4k)`)
+	clean := re.ReplaceAllString(title, "")
+	return strings.TrimSpace(clean)
+}
+
+// --- LOGIC PLAYLIST & PLAY ---
 func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, query, channelID string) {
 	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔍 Memproses permintaan...")
 
@@ -298,8 +380,15 @@ func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url st
 
 func (b *Bot) handleHelpCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	s.ChannelMessageSend(m.ChannelID, "🎵 **Music Bot Commands**\n"+
-		"• `@bot [judul/URL]` - Putar lagu/playlist\n"+
-		"• `@bot skip`, `stop`, `leave`, `queue`, `pause`, `resume`, `loop`")
+		"• `@bot [judul/URL]` - Putar lagu\n"+
+		"• `@bot q` / `queue` - Lihat antrian\n"+
+		"• `@bot l` / `lyrics` - Lihat lirik lagu saat ini\n"+
+		"• `@bot skip` - Lewati lagu\n"+
+		"• `@bot pause` / `resume` - Kontrol playback\n"+
+		"• `@bot vol [0-100]` - Atur volume\n"+
+		"• `@bot loop` - Mode ulang\n"+
+		"• `@bot stop` - Stop & Clear\n"+
+		"• `@bot leave` - Keluar channel")
 }
 
 func (b *Bot) handleSkipCommand(s *discordgo.Session, m *discordgo.MessageCreate) {

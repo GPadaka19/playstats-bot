@@ -127,8 +127,7 @@ func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCre
 	}
 
 	// 2. Cek Command Musik Spesifik
-	// PERBAIKAN: Menambahkan "help" dan "leave" ke daftar ini
-	musicCommands := []string{"skip", "stop", "leave", "queue", "pause", "resume", "loop", "volume", "help"}
+	musicCommands := []string{"skip", "stop", "leave", "queue", "q", "pause", "resume", "loop", "volume", "help", "h"}
 	
 	parts := strings.Fields(content)
 	if len(parts) > 0 {
