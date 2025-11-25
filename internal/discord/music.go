@@ -61,7 +61,9 @@ type MusicSession struct {
 var (
 	ytClient      = youtube.Client{}
 	musicSessions = make(map[string]*MusicSession)
+	searchSessions = make(map[string][]*MusicTrack)
 	sessionsMu    sync.Mutex
+	searchMu      sync.Mutex
 )
 
 // --- HANDLER UTAMA ---
@@ -112,9 +114,159 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 		b.handleVolumeCommand(s, m, parts)
 	case "lyrics", "ly":
 		b.handleLyricsCommand(s, m)
+	case "search", "s":
+		b.handleSearchCommand(s, m, parts)
 	default:
 		b.handlePlayMusic(s, m, content, "")
 	}
+}
+
+func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
+	if len(parts) < 2 {
+		s.ChannelMessageSend(m.ChannelID, "❌ Format: `@bot search [judul lagu]`")
+		return
+	}
+	query := strings.Join(parts[1:], " ")
+	s.ChannelMessageSend(m.ChannelID, "🔍 Mencari 10 lagu teratas...")
+
+	// Cari 10 lagu via yt-dlp
+	tracks, err := b.searchYouTubeList(query)
+	if err != nil {
+		s.ChannelMessageSend(m.ChannelID, "❌ Gagal mencari: "+err.Error())
+		return
+	}
+
+	// Simpan session pencarian user ini
+	searchMu.Lock()
+	searchSessions[m.Author.ID] = tracks
+	searchMu.Unlock()
+
+	// Tampilkan Embed
+	var desc strings.Builder
+	for i, t := range tracks {
+		desc.WriteString(fmt.Sprintf("`%d.` %s (%s)\n", i+1, t.Title, t.Duration))
+	}
+	desc.WriteString("\n**Ketik angka 1-10 untuk memilih, atau `cancel` untuk batal.**")
+
+	s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
+		Title:       "🔍 Hasil Pencarian: " + query,
+		Description: desc.String(),
+		Color:       0x00ff00,
+	})
+
+	// Hapus session setelah 30 detik (Timeout)
+	time.AfterFunc(30*time.Second, func() {
+		searchMu.Lock()
+		if _, ok := searchSessions[m.Author.ID]; ok {
+			delete(searchSessions, m.Author.ID)
+		}
+		searchMu.Unlock()
+	})
+}
+
+// Fungsi ini dipanggil oleh bot.go jika user mengetik angka
+func (b *Bot) handleSearchSelection(s *discordgo.Session, m *discordgo.MessageCreate) bool {
+	searchMu.Lock()
+	tracks, ok := searchSessions[m.Author.ID]
+	searchMu.Unlock()
+
+	if !ok { return false } // Bukan response search
+
+	content := strings.TrimSpace(m.Content)
+	
+	if strings.ToLower(content) == "cancel" {
+		searchMu.Lock()
+		delete(searchSessions, m.Author.ID)
+		searchMu.Unlock()
+		s.ChannelMessageSend(m.ChannelID, "❌ Pencarian dibatalkan.")
+		return true
+	}
+
+	// Cek apakah angka valid
+	choice, err := strconv.Atoi(content)
+	if err != nil || choice < 1 || choice > len(tracks) {
+		// Jika user ngetik chat biasa, abaikan saja (biar tidak ganggu)
+		return false
+	}
+
+	// Pilih lagu
+	selected := tracks[choice-1]
+	
+	// Bersihkan session
+	searchMu.Lock()
+	delete(searchSessions, m.Author.ID)
+	searchMu.Unlock()
+
+	// Mainkan lagu (Mirip logika handlePlayMusic tapi dipotong)
+	session := b.getOrCreateMusicSession(m.GuildID)
+	selected.Requester = m.Author.Username
+	selected.ChannelID = m.ChannelID
+	
+	// Cek voice state untuk ambil channel ID (karena handleSearchCommand tidak ngecek voice)
+	vs, _ := s.State.VoiceState(m.GuildID, m.Author.ID)
+	if vs == nil {
+		s.ChannelMessageSend(m.ChannelID, "❌ Masuk voice channel dulu bang!")
+		return true
+	}
+
+	session.Mu.Lock()
+	if session.IdleTimer != nil {
+		session.IdleTimer.Stop()
+		session.IdleTimer = nil
+	}
+	session.Queue.Tracks = append(session.Queue.Tracks, selected)
+	queuePos := len(session.Queue.Tracks)
+	session.Mu.Unlock()
+
+	s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
+		Title:       "✅ Ditambahkan ke Queue",
+		Description: fmt.Sprintf("[%s](%s)", selected.Title, selected.URL),
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: "Posisi", Value: fmt.Sprintf("#%d", queuePos), Inline: true},
+		},
+		Color:       0x00ff00,
+		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: selected.Thumbnail},
+	})
+
+	if session.VoiceConn == nil {
+		if err := b.connectToVoice(s, m.GuildID, vs.ChannelID); err != nil {
+			s.ChannelMessageSend(m.ChannelID, "❌ Gagal connect voice: "+err.Error())
+			return true
+		}
+	}
+
+	if !session.Queue.IsPlaying {
+		go b.startMusicPlayer(s, m.GuildID)
+	}
+
+	return true // Handled
+}
+
+func (b *Bot) searchYouTubeList(query string) ([]*MusicTrack, error) {
+	// ytsearch10: cari 10 hasil
+	cmd := exec.Command("yt-dlp", "ytsearch10:"+query, "--print", "%(id)s\t%(title)s\t%(duration)s", "--no-playlist")
+	output, err := cmd.Output()
+	if err != nil { return nil, err }
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var tracks []*MusicTrack
+	
+	for _, line := range lines {
+		if line == "" { continue }
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 { continue }
+		
+		durationSec := 0.0
+		if len(parts) >= 3 { fmt.Sscanf(parts[2], "%f", &durationSec) }
+
+		tracks = append(tracks, &MusicTrack{
+			Title:    parts[1],
+			URL:      "https://www.youtube.com/watch?v=" + parts[0], // Original URL
+			Duration: time.Duration(durationSec) * time.Second,
+			Thumbnail: "https://img.youtube.com/vi/" + parts[0] + "/hqdefault.jpg",
+		})
+	}
+	return tracks, nil
 }
 
 // --- FITUR LIRIK ---
