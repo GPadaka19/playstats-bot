@@ -98,7 +98,7 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 		b.handleSkipCommand(s, m)
 	case "stop":
 		b.handleStopCommand(s, m)
-	case "leave":
+	case "leave", "l":
 		b.handleLeaveCommand(s, m)
 	case "queue", "q": // Alias q
 		b.handleQueueCommand(s, m)
@@ -110,7 +110,7 @@ func (b *Bot) handleMusicCommand(s *discordgo.Session, m *discordgo.MessageCreat
 		b.handleLoopCommand(s, m)
 	case "volume":
 		b.handleVolumeCommand(s, m, parts)
-	case "lyrics", "l": // Fitur Lirik & Alias l
+	case "lyrics", "ly":
 		b.handleLyricsCommand(s, m)
 	default:
 		b.handlePlayMusic(s, m, content, "")
@@ -402,23 +402,26 @@ func (b *Bot) handleSkipCommand(s *discordgo.Session, m *discordgo.MessageCreate
 }
 
 func (b *Bot) handleLeaveCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	session := b.getOrCreateMusicSession(m.GuildID)
-	session.Mu.Lock()
-	
-	session.Queue.Tracks = nil
-	if session.StreamCancel != nil { session.StreamCancel() }
-	if session.IdleTimer != nil { session.IdleTimer.Stop() }
-	
-	conn := session.VoiceConn
-	session.VoiceConn = nil
-	session.Mu.Unlock()
+    session := b.getOrCreateMusicSession(m.GuildID)
+    session.Mu.Lock()
+    
+    session.Queue.Tracks = nil
+    if session.StreamCancel != nil { session.StreamCancel() }
+    if session.IdleTimer != nil { session.IdleTimer.Stop() }
+    
+    conn := session.VoiceConn
+    session.VoiceConn = nil
+    session.Mu.Unlock()
 
-	if conn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		conn.Disconnect(ctx)
-		s.ChannelMessageSend(m.ChannelID, "👋 Bye!")
-	}
+    // PERBAIKAN: Cek apakah koneksi ada, bukan cek command string
+    if conn != nil {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        conn.Disconnect(ctx)
+        s.ChannelMessageSend(m.ChannelID, "👋 Bye!")
+    } else {
+        s.ChannelMessageSend(m.ChannelID, "❌ Bot tidak di voice channel.")
+    }
 }
 
 func (b *Bot) handleStopCommand(s *discordgo.Session, m *discordgo.MessageCreate) {

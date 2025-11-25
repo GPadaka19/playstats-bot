@@ -127,7 +127,7 @@ func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCre
 	}
 
 	// 2. Cek Command Musik Spesifik
-	musicCommands := []string{"skip", "stop", "leave", "queue", "q", "pause", "resume", "loop", "volume", "help", "h"}
+	musicCommands := []string{"skip", "stop", "leave", "l", "queue", "q", "pause", "resume", "loop", "volume", "help", "h", "lyrics", "ly"}
 	
 	parts := strings.Fields(content)
 	if len(parts) > 0 {
