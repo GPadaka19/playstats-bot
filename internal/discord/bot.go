@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -20,6 +21,7 @@ type Bot struct {
 	session          *discordgo.Session
 	repository       *database.Repository
 	spotify          *spotify.Client
+	sessionsMu       sync.Mutex
 	sessions         map[string]models.VoiceSession // key: guildID:userID -> voice session
 	activitySessions map[string]time.Time           // key: userID:activity -> startTime
 	tzUTC7           *time.Location
@@ -168,6 +170,7 @@ func (b *Bot) handleMentionCommand(s *discordgo.Session, m *discordgo.MessageCre
 	b.handleStatsCommand(s, m)
 }
 
+
 // isMusicQuery checks if the content looks like a music query
 func (b *Bot) isMusicQuery(content string) bool {
 	content = strings.ToLower(content)
@@ -191,108 +194,117 @@ func (b *Bot) isMusicQuery(content string) bool {
 func (b *Bot) voiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	userID := vs.UserID
 	guildID := vs.GuildID
+	
+	// Ignore bot itself
+	if userID == s.State.User.ID { return }
+
 	key := guildID + ":" + userID
 
-	// Get user info
-	user, err := s.User(userID)
+	// Gunakan Mutex Lock agar aman saat concurrent
+	b.sessionsMu.Lock()
+	defer b.sessionsMu.Unlock()
+
+	// Ambil data sesi user saat ini (jika ada)
+	session, isTracking := b.sessions[key]
+	
+	// Dapatkan username untuk logging
+	user, _ := s.User(userID)
 	username := userID
-	if err == nil && user != nil {
-		username = user.Username
+	if user != nil { username = user.Username }
+
+	// LOGIKA 1: USER JOIN (Dari tidak ada channel ke ada channel)
+	if vs.ChannelID != "" && !isTracking {
+		b.sessions[key] = models.VoiceSession{
+			Start:     time.Now().UTC(),
+			ChannelID: vs.ChannelID,
+		}
+		fmt.Printf("➡️ Join: %s (%s)\n", username, userID)
+		return
 	}
 
-	// Join channel
-	if vs.ChannelID == "" && !b.sessions[key].Start.IsZero() {
-        start := b.sessions[key].Start
-        channelID := b.sessions[key].ChannelID
-        durationSeconds := int64(time.Since(start).Seconds())
-        delete(b.sessions, key)
+	// LOGIKA 2: USER LEAVE (Dari ada channel ke kosong)
+	if vs.ChannelID == "" && isTracking {
+		duration := int64(time.Since(session.Start).Seconds())
+		delete(b.sessions, key)
+		b.saveVoiceStats(userID, guildID, session.ChannelID, duration)
+		fmt.Printf("⬅️ Leave: %s (%s) +%ds\n", username, userID, duration)
+		return
+	}
 
-        // 1. Simpan Total Hours (Logic Lama - Tetap Biarkan)
-        b.repository.AddVoiceSeconds(userID, guildID, durationSeconds)
-        b.repository.AddChannelSeconds(userID, guildID, channelID, durationSeconds)
+	// LOGIKA 3: SWITCH CHANNEL (Pindah dari Channel A ke B)
+	if vs.ChannelID != "" && isTracking && vs.ChannelID != session.ChannelID {
+		// Hitung durasi di channel lama
+		duration := int64(time.Since(session.Start).Seconds())
+		
+		// Simpan stats channel LAMA
+		b.saveVoiceStats(userID, guildID, session.ChannelID, duration)
+		fmt.Printf("🔄 Switch: %s (%s) %s -> %s (+%ds)\n", username, userID, session.ChannelID, vs.ChannelID, duration)
 
-        // 2. FITUR BARU: Simpan Daily & Weekly Stats
-        now := time.Now().In(b.tzUTC7)
-        date := now.Format("2006-01-02") // Format tanggal YYYY-MM-DD
-        
-        // Hitung awal minggu (Senin)
-        weekday := int(now.Weekday())
-        if weekday == 0 { weekday = 7 } // Minggu (0) jadi 7
-        weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
-
-        // Simpan ke DB (Voice Only -> activitySeconds = 0)
-        b.repository.AddDailyStats(date, userID, guildID, durationSeconds, 0, "")
-        b.repository.AddWeeklyStats(weekStart, userID, guildID, durationSeconds, 0, "")
-
-        fmt.Printf("⬅️ Leave: %s (%s), +%d seconds (Saved to Daily/Weekly)\n", username, userID, durationSeconds)
-    }
+		// Reset timer untuk channel BARU
+		b.sessions[key] = models.VoiceSession{
+			Start:     time.Now().UTC(),
+			ChannelID: vs.ChannelID,
+		}
+	}
 }
 
-// presenceUpdate handles presence updates for activity tracking
+// Helper untuk menyimpan ke DB (Biar tidak duplikat kode)
+func (b *Bot) saveVoiceStats(userID, guildID, channelID string, duration int64) {
+	if duration <= 0 { return } // Jangan simpan durasi 0/negatif
+
+	// 1. Simpan Total Lifetime
+	b.repository.AddVoiceSeconds(userID, guildID, duration)
+	b.repository.AddChannelSeconds(userID, guildID, channelID, duration)
+
+	// 2. Simpan Daily & Weekly
+	now := time.Now().In(b.tzUTC7)
+	date := now.Format("2006-01-02")
+	
+	weekday := int(now.Weekday())
+	if weekday == 0 { weekday = 7 }
+	weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
+
+	b.repository.AddDailyStats(date, userID, guildID, duration, 0, "")
+	b.repository.AddWeeklyStats(weekStart, userID, guildID, duration, 0, "")
+}
+
 func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) {
-	guildID := p.GuildID
 	userID := p.User.ID
+	if userID == s.State.User.ID { return }
+	user, _ := s.User(userID); username := userID; if user != nil { username = user.Username }
 
-	// Get user info
-	user, err := s.User(userID)
-	username := userID
-	if err == nil && user != nil {
-		username = user.Username
-	}
-
-	log.Printf("presenceUpdate: guild=%s user=%s (%s) activities=%d", guildID, userID, username, len(p.Activities))
-
-	// Collect relevant activity names (Game/Application)
 	activeSet := make(map[string]bool)
 	for _, act := range p.Activities {
-		name := act.Name
-		
-		// PERBAIKAN: Filter activity "Hang Status"
-		if name == "Hang Status" {
-			continue
-		}
-
-		if name != "" {
-			activeSet[name] = true
-			log.Printf("activity on: %s (%s) | %s", username, userID, name)
+		if act.Name == "Hang Status" { continue }
+		if act.Name != "" { activeSet[act.Name] = true }
+	}
+	
+	for key, start := range b.activitySessions {
+		prefix := userID + ":"
+		if !strings.HasPrefix(key, prefix) { continue }
+		activityName := strings.TrimPrefix(key, prefix)
+		if !activeSet[activityName] {
+			seconds := int64(time.Since(start).Seconds())
+			delete(b.activitySessions, key)
+			b.repository.AddActivitySeconds(userID, activityName, seconds)
+			
+			now := time.Now().In(b.tzUTC7)
+			date := now.Format("2006-01-02")
+			weekday := int(now.Weekday()); if weekday == 0 { weekday = 7 }
+			weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
+			
+			b.repository.AddDailyStats(date, userID, p.GuildID, 0, seconds, activityName)
+			b.repository.AddWeeklyStats(weekStart, userID, p.GuildID, 0, seconds, activityName)
+			
+			log.Printf("🎮 STOP: %s | %s (+%ds)", username, activityName, seconds)
 		}
 	}
 
-	// Close activities that were previously active but now inactive
-	for key, start := range b.activitySessions {
-        prefix := userID + ":"
-        if !strings.HasPrefix(key, prefix) { continue }
-        
-        activityName := strings.TrimPrefix(key, prefix)
-        if !activeSet[activityName] {
-            seconds := int64(time.Since(start).Seconds())
-            delete(b.activitySessions, key)
-            
-            // 1. Simpan Total Hours (Logic Lama)
-            b.repository.AddActivitySeconds(userID, activityName, seconds)
-
-            // 2. FITUR BARU: Simpan Daily & Weekly Stats
-            now := time.Now().In(b.tzUTC7)
-            date := now.Format("2006-01-02")
-            
-            weekday := int(now.Weekday())
-            if weekday == 0 { weekday = 7 }
-            weekStart := now.AddDate(0, 0, -weekday+1).Format("2006-01-02")
-
-            // Simpan ke DB (Activity Only -> voiceSeconds = 0)
-            b.repository.AddDailyStats(date, userID, guildID, 0, seconds, activityName)
-            b.repository.AddWeeklyStats(weekStart, userID, guildID, 0, seconds, activityName)
-
-            log.Printf("🎮 Activity STOP: %s | %s (+%ds) [Saved]", username, activityName, seconds)
-        }
-    }
-
-	// Start new activities that haven't been recorded
 	for name := range activeSet {
 		key := userID + ":" + name
 		if b.activitySessions[key].IsZero() {
 			b.activitySessions[key] = time.Now().UTC()
-			log.Printf("activity start: %s (%s) | %s", username, userID, name)
+			log.Printf("🎮 START: %s | %s", username, name)
 		}
 	}
 }
