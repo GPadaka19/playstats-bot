@@ -440,18 +440,23 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 		return
 	}
 
-	// 2. Set Info Tambahan
-	if channelID == "" {
+	// 2. Tentukan Voice Channel ID (untuk join)
+	// Kita pisahkan antara ID channel buat Join Voice dengan ID channel buat Notifikasi
+	targetVoiceChannel := channelID
+	if targetVoiceChannel == "" {
 		vs, _ := s.State.VoiceState(m.GuildID, m.Author.ID)
-		if vs != nil { channelID = vs.ChannelID }
+		if vs != nil { targetVoiceChannel = vs.ChannelID }
 	}
 
+	// 3. Set Info Track
 	for _, t := range tracks {
 		t.Requester = m.Author.Username
-		t.ChannelID = channelID
+		// PERBAIKAN: Selalu gunakan Text Channel asal command (m.ChannelID) untuk notifikasi "Now Playing"
+		// Jangan gunakan voice channel ID, karena itu akan mengirim ke chat dalam voice
+		t.ChannelID = m.ChannelID 
 	}
 
-	// 3. Masukkan ke Queue
+	// 4. Masukkan ke Queue
 	session := b.getOrCreateMusicSession(m.GuildID)
 	session.Mu.Lock()
 	if session.IdleTimer != nil {
@@ -461,7 +466,7 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 	session.Queue.Tracks = append(session.Queue.Tracks, tracks...)
 	session.Mu.Unlock()
 
-	// 4. Response
+	// 5. Response
 	if len(tracks) == 1 {
 		embed := &discordgo.MessageEmbed{
 			Title:       "✅ Ditambahkan ke Queue",
@@ -473,9 +478,10 @@ func (b *Bot) handlePlayMusic(s *discordgo.Session, m *discordgo.MessageCreate, 
 		s.ChannelMessageEdit(m.ChannelID, loadingMsg.ID, fmt.Sprintf("✅ Berhasil menambahkan **%d** lagu dari Playlist ke Queue!", len(tracks)))
 	}
 
-	// 5. Connect & Play
+	// 6. Connect & Play
 	if session.VoiceConn == nil {
-		if err := b.connectToVoice(s, m.GuildID, channelID); err != nil {
+		// Gunakan targetVoiceChannel yang sudah didapat (bukan m.ChannelID)
+		if err := b.connectToVoice(s, m.GuildID, targetVoiceChannel); err != nil {
 			s.ChannelMessageSend(m.ChannelID, "❌ Gagal connect voice: "+err.Error())
 			return
 		}
