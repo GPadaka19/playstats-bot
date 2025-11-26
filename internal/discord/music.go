@@ -903,7 +903,35 @@ func (b *Bot) searchYouTube(query string) (*MusicTrack, error) {
 }
 
 func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
-	return &MusicTrack{Title: "YouTube Video", URL: url}, nil
+	// Gunakan yt-dlp untuk mengambil metadata asli (Judul, Durasi, ID)
+	// --print: Hanya cetak info spesifik (hemat bandwidth)
+	// --no-playlist: Pastikan cuma ambil 1 video jika linknya playlist
+	cmd := exec.Command("yt-dlp", url, "--print", "%(title)s\t%(duration)s\t%(id)s", "--no-playlist", "--quiet")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gagal mengambil info lagu: %v", err)
+	}
+
+	// Parsing output: "Judul Lagu [TAB] 204.5 [TAB] dQw4w9WgXcQ"
+	parts := strings.Split(strings.TrimSpace(string(output)), "\t")
+	if len(parts) < 3 {
+		// Fallback jika gagal parsing, setidaknya linknya benar
+		return &MusicTrack{Title: "YouTube Video", URL: url}, nil 
+	}
+
+	title := parts[0]
+	
+	durationSec := 0.0
+	fmt.Sscanf(parts[1], "%f", &durationSec)
+	
+	id := parts[2]
+
+	return &MusicTrack{
+		Title:     title,
+		URL:       "https://www.youtube.com/watch?v=" + id,
+		Duration:  time.Duration(durationSec) * time.Second,
+		Thumbnail: "https://img.youtube.com/vi/" + id + "/hqdefault.jpg",
+	}, nil
 }
 
 func (b *Bot) extractWithYtDlp(url string) (*MusicTrack, error) {
