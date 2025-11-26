@@ -71,11 +71,18 @@ func (b *Bot) Start() error {
 	}
 
 	fmt.Println("✅ Bot is running...")
+
+	b.LoadMusicState() 
+
 	return nil
 }
 
 // Stop stops the bot
 func (b *Bot) Stop() error {
+	fmt.Println("🛑 Shutting down bot...")
+
+	b.SaveMusicState()
+
 	return b.session.Close()
 }
 

@@ -58,12 +58,19 @@ type MusicSession struct {
 	Mu           sync.Mutex
 }
 
+type MusicStateBackup struct {
+	GuildID        string      `json:"guild_id"`
+	VoiceChannelID string      `json:"voice_channel_id"`
+	Queue          *MusicQueue `json:"queue"`
+}
+
 var (
 	ytClient      = youtube.Client{}
 	musicSessions = make(map[string]*MusicSession)
 	searchSessions = make(map[string][]*MusicTrack)
 	sessionsMu    sync.Mutex
 	searchMu      sync.Mutex
+	backupFile = "music_state.json"
 )
 
 // --- HANDLER UTAMA ---
@@ -629,7 +636,9 @@ func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url st
 
 		// 1. Baca data mentah dari FFmpeg
 		_, err := io.ReadFull(ffmpegOut, pcmBuf)
-		if err == io.EOF {
+		
+		// [FIX] Tangani unexpected EOF sebagai akhir lagu biasa
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return nil
 		}
 		if err != nil {
@@ -899,4 +908,133 @@ func (b *Bot) extractYouTubeInfo(url string) (*MusicTrack, error) {
 
 func (b *Bot) extractWithYtDlp(url string) (*MusicTrack, error) {
 	return &MusicTrack{Title: "Video", URL: url}, nil
+}
+
+func (b *Bot) SaveMusicState() {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+
+	var backups []MusicStateBackup
+
+	for guildID, session := range musicSessions {
+		session.Mu.Lock()
+		// Hanya simpan jika ada antrian atau sedang memutar
+		if len(session.Queue.Tracks) > 0 {
+			voiceID := ""
+			
+			// PERBAIKAN: Gunakan b.session.State untuk mendapatkan ChannelID
+			// karena field VoiceConn.ChannelID mungkin tidak tersedia/undefined
+			if b.session.State != nil && b.session.State.User != nil {
+				vs, err := b.session.State.VoiceState(guildID, b.session.State.User.ID)
+				if err == nil && vs != nil {
+					voiceID = vs.ChannelID
+				}
+			}
+
+			// [FITUR BARU] Kirim Pesan Maintenance ke Text Channel
+			// Kita ambil Text Channel ID dari lagu yang sedang/akan diputar
+			textChannelID := ""
+			// Prioritaskan lagu yang sedang diputar (current), kalau tidak ada baru lagu pertama
+			idx := session.Queue.Current
+			if idx < len(session.Queue.Tracks) {
+				textChannelID = session.Queue.Tracks[idx].ChannelID
+			} else if len(session.Queue.Tracks) > 0 {
+				textChannelID = session.Queue.Tracks[0].ChannelID
+			}
+
+			if textChannelID != "" {
+				// Kirim pesan pamit
+				b.session.ChannelMessageSend(textChannelID, 
+					"⚠️ **Bot sedang restart untuk update!**\n"+
+					"Tenang, antrian lagu sudah disimpan. Bot akan kembali dan memutar lagu secara otomatis dalam beberapa detik. Mohon bersabar ya! 🛠️")
+			}
+
+			// Masukkan ke struct backup
+			backups = append(backups, MusicStateBackup{
+				GuildID:        guildID,
+				VoiceChannelID: voiceID,
+				Queue:          session.Queue,
+			})
+		}
+		session.Mu.Unlock()
+	}
+
+	if len(backups) == 0 {
+		os.Remove(backupFile)
+		return
+	}
+
+	file, err := os.Create(backupFile)
+	if err != nil {
+		log.Printf("❌ Gagal membuat file backup: %v", err)
+		return
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(backups); err != nil {
+		log.Printf("❌ Gagal menyimpan state musik: %v", err)
+	} else {
+		log.Printf("💾 Music State Saved: %d sessions backed up.", len(backups))
+	}
+}
+
+func (b *Bot) LoadMusicState() {
+	file, err := os.Open(backupFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("⚠️ Gagal membuka file backup: %v", err)
+		}
+		return // File tidak ada, skip aja
+	}
+	defer file.Close()
+
+	var backups []MusicStateBackup
+	if err := json.NewDecoder(file).Decode(&backups); err != nil {
+		log.Printf("⚠️ Gagal decode file backup: %v", err)
+		return
+	}
+
+	log.Printf("📂 Found backup! Restoring %d sessions...", len(backups))
+
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+
+	for _, backup := range backups {
+		// Restore struct session
+		session := &MusicSession{
+			Queue: backup.Queue,
+		}
+		musicSessions[backup.GuildID] = session
+
+		// AUTO-RESUME LOGIC
+		// Kita perlu jalankan ini di goroutine terpisah agar tidak memblokir startup bot
+		go func(bkp MusicStateBackup, sess *MusicSession) {
+			// Tunggu sebentar biar koneksi discord stabil dulu
+			time.Sleep(5 * time.Second)
+
+			// 1. Cek apakah harus join voice
+			if bkp.VoiceChannelID != "" {
+				err := b.connectToVoice(b.session, bkp.GuildID, bkp.VoiceChannelID)
+				if err != nil {
+					log.Printf("❌ Gagal auto-rejoin voice (Guild: %s): %v", bkp.GuildID, err)
+					return
+				}
+			}
+
+			// 2. Cek apakah harus lanjut play
+			sess.Mu.Lock()
+			shouldPlay := (sess.Queue.IsPlaying || len(sess.Queue.Tracks) > 0)
+			
+			// Reset flag IsPlaying jadi false dulu biar trigger startMusicPlayer jalan normal
+			sess.Queue.IsPlaying = false 
+			sess.Mu.Unlock()
+
+			if shouldPlay {
+				log.Printf("▶️ Auto-resuming playback for Guild: %s", bkp.GuildID)
+				b.startMusicPlayer(b.session, bkp.GuildID)
+			}
+		}(backup, session)
+	}
 }
