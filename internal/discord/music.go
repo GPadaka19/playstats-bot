@@ -500,57 +500,113 @@ func (b *Bot) startMusicPlayer(s *discordgo.Session, guildID string) {
 }
 
 func (b *Bot) playAudioStream(ctx context.Context, session *MusicSession, url string) error {
-	if session.VoiceConn == nil { return fmt.Errorf("voice connection not ready") }
+	if session.VoiceConn == nil {
+		return fmt.Errorf("voice connection not ready")
+	}
 
 	fmt.Println("🔄 Mengambil stream URL via yt-dlp (Direct Pipe)...")
-	
+
 	// JURUS PAMUNGKAS: Direct Pipe yt-dlp -> ffmpeg
 	ytCmd := exec.CommandContext(ctx, "yt-dlp", "-f", "bestaudio", "-o", "-", "--quiet", url)
 	ytOut, err := ytCmd.StdoutPipe()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	ffmpegCmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
 		"-i", "pipe:0", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
 	ffmpegCmd.Stdin = ytOut
 	ffmpegOut, err := ffmpegCmd.StdoutPipe()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
-	if err := ytCmd.Start(); err != nil { return err }
-	if err := ffmpegCmd.Start(); err != nil { return err }
+	if err := ytCmd.Start(); err != nil {
+		return err
+	}
+	if err := ffmpegCmd.Start(); err != nil {
+		return err
+	}
 
 	session.Mu.Lock()
 	session.FfmpegProc = ffmpegCmd.Process
 	session.Mu.Unlock()
 
 	defer func() {
-		if ytCmd.Process != nil { ytCmd.Process.Kill() }
-		if ffmpegCmd.Process != nil { ffmpegCmd.Process.Kill() }
+		if ytCmd.Process != nil {
+			ytCmd.Process.Kill()
+		}
+		if ffmpegCmd.Process != nil {
+			ffmpegCmd.Process.Kill()
+		}
 	}()
 
 	encoder, err := gopus.NewEncoder(48000, 2, gopus.Audio)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	session.VoiceConn.Speaking(true)
 	defer session.VoiceConn.Speaking(false)
 
 	frameSize := 960
-	pcmBuf := make([]byte, frameSize*2*2)
+	pcmBuf := make([]byte, frameSize*2*2) // 960 samples * 2 channels * 2 bytes (int16)
 	pcmInt16 := make([]int16, frameSize*2)
 
 	for {
 		select {
-		case <-ctx.Done(): return ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 		}
+
+		// 1. Baca data mentah dari FFmpeg
 		_, err := io.ReadFull(ffmpegOut, pcmBuf)
-		if err == io.EOF { return nil }
-		if err != nil { return err }
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		// 2. Convert byte array ke int16 array
 		binary.Read(bytes.NewReader(pcmBuf), binary.LittleEndian, pcmInt16)
-		opusData, _ := encoder.Encode(pcmInt16, frameSize, frameSize*2)
-		
+
+		// 3. --- LOGIKA VOLUME ---
+		session.Mu.Lock()
+		currentVol := session.Queue.Volume
+		session.Mu.Unlock()
+
+		// Hanya proses jika volume tidak 100% (1.0) untuk efisiensi
+		if currentVol != 1.0 {
+			for i, v := range pcmInt16 {
+				// Kalikan sample dengan volume (scaling)
+				scaled := float64(v) * currentVol
+
+				// Clamping: Pastikan nilai tidak melebihi batas int16 (-32768 s/d 32767)
+				if scaled > 32767 {
+					scaled = 32767
+				} else if scaled < -32768 {
+					scaled = -32768
+				}
+
+				pcmInt16[i] = int16(scaled)
+			}
+		}
+		// ------------------------
+
+		// 4. Encode ke Opus
+		opusData, err := encoder.Encode(pcmInt16, frameSize, frameSize*2)
+		if err != nil {
+			fmt.Printf("Opus encoding error: %v\n", err)
+			continue
+		}
+
+		// 5. Kirim ke Discord
 		select {
 		case session.VoiceConn.OpusSend <- opusData:
 		case <-time.After(1 * time.Second):
+			// Timeout prevention jika koneksi voice macet
 		}
 	}
 }
