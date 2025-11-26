@@ -136,7 +136,7 @@ func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Simpan hasil pencarian sementara (untuk diambil saat user klik menu)
+	// Simpan hasil pencarian sementara
 	searchMu.Lock()
 	searchSessions[m.Author.ID] = tracks
 	searchMu.Unlock()
@@ -154,12 +154,16 @@ func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCrea
 		})
 	}
 
-	// Buat Komponen (Dropdown + Tombol Cancel)
+	// UX: Tanamkan ID User ke CustomID agar bisa divalidasi nanti
+	// Format: "action:userID"
+	menuID := "search_select:" + m.Author.ID
+	cancelID := "search_cancel:" + m.Author.ID
+
 	components := []discordgo.MessageComponent{
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.SelectMenu{
-					CustomID:    "search_select",
+					CustomID:    menuID,
 					Placeholder: "Pilih lagu untuk diputar...",
 					Options:     options,
 				},
@@ -170,7 +174,7 @@ func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCrea
 				discordgo.Button{
 					Label:    "Batal",
 					Style:    discordgo.DangerButton,
-					CustomID: "search_cancel",
+					CustomID: cancelID,
 				},
 			},
 		},
@@ -178,7 +182,7 @@ func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCrea
 
 	// Kirim Pesan Interaktif
 	msg := &discordgo.MessageSend{
-		Content: "🔍 **Hasil Pencarian:** Silakan pilih di bawah ini.",
+		Content: fmt.Sprintf("🔍 **Hasil Pencarian** (untuk <@%s>)\nSilakan pilih di bawah ini.", m.Author.ID),
 		Components: components,
 	}
 	s.ChannelMessageSendComplex(m.ChannelID, msg)
@@ -191,62 +195,117 @@ func (b *Bot) handleSearchCommand(s *discordgo.Session, m *discordgo.MessageCrea
 	})
 }
 
-// Fungsi ini dipanggil dari bot.go saat user klik menu
+// Handler interaksi dengan VALIDASI UX yang lebih baik
 func (b *Bot) handleSearchInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Ambil User ID (bisa dari Member jika di server, User jika di DM)
-	userID := ""; if i.Member != nil { userID = i.Member.User.ID } else { userID = i.User.ID }
+	// 1. Identifikasi User yang melakukan klik
+	userID := ""
+	if i.Member != nil {
+		userID = i.Member.User.ID
+	} else {
+		userID = i.User.ID
+	}
 
-	// Cek Tombol Cancel
-	if i.MessageComponentData().CustomID == "search_cancel" {
+	// 2. Parse CustomID untuk validasi kepemilikan
+	// Format yang diharapkan: "search_select:USER_ID" atau "search_cancel:USER_ID"
+	fullID := i.MessageComponentData().CustomID
+	parts := strings.Split(fullID, ":")
+	action := parts[0]
+
+	// Default owner adalah pengklik jika format ID masih lama (fallback)
+	ownerID := userID 
+	if len(parts) > 1 {
+		ownerID = parts[1]
+	}
+
+	// 3. UX VALIDATION: Cek apakah pengklik adalah pemilik menu
+	if userID != ownerID {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseUpdateMessage,
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "❌ Pencarian dibatalkan.", Components: []discordgo.MessageComponent{},
+				// Flag Ephemeral membuat pesan ini hanya terlihat oleh si pengklik
+				Content: fmt.Sprintf("🚫 **Eits!** Menu ini milik <@%s>.\nKamu bisa cari lagu sendiri pakai command `@bot search` ya!", ownerID),
+				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
-		searchMu.Lock(); delete(searchSessions, userID); searchMu.Unlock()
 		return
 	}
 
-	// Cek Pilihan Menu
-	if i.MessageComponentData().CustomID == "search_select" {
+	// 4. Logic Tombol Cancel
+	if action == "search_cancel" {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    "❌ Pencarian dibatalkan.",
+				Components: []discordgo.MessageComponent{}, // Hapus menu/tombol
+			},
+		})
+		// Hapus sesi dari memori
+		searchMu.Lock()
+		delete(searchSessions, userID)
+		searchMu.Unlock()
+		return
+	}
+
+	// 5. Logic Pilihan Menu (Select)
+	if action == "search_select" {
 		values := i.MessageComponentData().Values
-		if len(values) == 0 { return }
+		if len(values) == 0 {
+			return
+		}
 
-		idx, _ := strconv.Atoi(values[0]) // Ambil index pilihan
+		idx, _ := strconv.Atoi(values[0])
 
+		// Ambil data track & Hapus sesi (Single use)
 		searchMu.Lock()
 		tracks, ok := searchSessions[userID]
-		delete(searchSessions, userID) // Bersihkan session setelah pilih
+		if ok {
+			delete(searchSessions, userID)
+		}
 		searchMu.Unlock()
 
+		// UX VALIDATION: Cek Session Expired
 		if !ok || idx >= len(tracks) {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{Content: "⚠️ Sesi pencarian kadaluwarsa. Cari ulang ya!", Flags: discordgo.MessageFlagsEphemeral},
+				Data: &discordgo.InteractionResponseData{
+					Content: "⚠️ **Waktu Habis!** Sesi pencarian sudah kadaluwarsa (batas 1 menit). Silakan cari ulang.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
 			})
 			return
 		}
 
 		selected := tracks[idx]
-		
-		// Cek Voice
+
+		// UX VALIDATION: Cek Voice Channel
 		vs, _ := s.State.VoiceState(i.GuildID, userID)
 		if vs == nil {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{Content: "❌ Masuk voice channel dulu!", Flags: discordgo.MessageFlagsEphemeral},
+				Data: &discordgo.InteractionResponseData{
+					Content: "❌ Kamu harus masuk voice channel dulu untuk memutar lagu!",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
 			})
 			return
 		}
 
-		// Masukkan ke Queue
+		// --- PROSES PLAY ---
 		session := b.getOrCreateMusicSession(i.GuildID)
-		selected.Requester = i.Member.User.Username // atau i.User.Username
+		
+		// Isi metadata requester
+		if i.Member != nil {
+			selected.Requester = i.Member.User.Username
+		} else {
+			selected.Requester = i.User.Username
+		}
 		selected.ChannelID = i.ChannelID
 
 		session.Mu.Lock()
-		if session.IdleTimer != nil { session.IdleTimer.Stop(); session.IdleTimer = nil }
+		if session.IdleTimer != nil {
+			session.IdleTimer.Stop()
+			session.IdleTimer = nil
+		}
 		session.Queue.Tracks = append(session.Queue.Tracks, selected)
 		session.Mu.Unlock()
 
@@ -254,14 +313,16 @@ func (b *Bot) handleSearchInteraction(s *discordgo.Session, i *discordgo.Interac
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("✅ **%s** ditambahkan ke antrian!", selected.Title),
-				Components: []discordgo.MessageComponent{}, // Hapus menu
+				Content:    fmt.Sprintf("✅ **%s** ditambahkan ke antrian!", selected.Title),
+				Components: []discordgo.MessageComponent{}, // Bersihkan UI
 			},
 		})
 
-		// Connect & Play
+		// Connect & Start Player
 		if session.VoiceConn == nil {
-			if err := b.connectToVoice(s, i.GuildID, vs.ChannelID); err != nil { return }
+			if err := b.connectToVoice(s, i.GuildID, vs.ChannelID); err != nil {
+				return 
+			}
 		}
 		if !session.Queue.IsPlaying {
 			go b.startMusicPlayer(s, i.GuildID)
