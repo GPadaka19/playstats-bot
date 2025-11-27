@@ -117,7 +117,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		b.handleMentionCommand(s, m)
 	case content == "!stats":
 		b.handleStatsCommand(s, m)
-	case strings.HasPrefix(content, "!leaderboard"):
+	case strings.HasPrefix(content, "!lb"):
 		b.handleLeaderboardCommand(s, m)
 	case strings.HasPrefix(content, "!compare"):
 		b.handleCompareCommand(s, m)
