@@ -360,26 +360,105 @@ func (b *Bot) handleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreat
 func (b *Bot) handleLeaderboardCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	parts := strings.Fields(m.Content)
 	if len(parts) < 2 {
-		s.ChannelMessageSend(m.ChannelID, "Format: `!lb voice` atau `!lb play <nama game/apps>`")
+		s.ChannelMessageSend(m.ChannelID, "❌ **Format Salah**\nGunakan: `!leaderboard voice` atau `!leaderboard play <nama game>`")
 		return
 	}
-	
-	if parts[1] == "voice" {
-		entries, _ := b.repository.GetVoiceLeaderboard(m.GuildID, 10)
-		var lines []string
-		for _, e := range entries {
-			lines = append(lines, fmt.Sprintf("%d. <@%s> - %s", e.Rank, e.UserID, utils.FormatDuration(e.TotalSeconds)))
-		}
-		s.ChannelMessageSend(m.ChannelID, "🏆 **Voice Leaderboard**\n"+strings.Join(lines, "\n"))
-	} else if parts[1] == "play" && len(parts) >= 3 {
-		game := strings.Join(parts[2:], " ")
-		entries, _ := b.repository.GetActivityLeaderboard(game, 10)
-		var lines []string
-		for _, e := range entries {
-			lines = append(lines, fmt.Sprintf("%d. <@%s> - %s", e.Rank, e.UserID, utils.FormatDuration(e.TotalSeconds)))
-		}
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🎮 **Leaderboard %s**\n%s", game, strings.Join(lines, "\n")))
+
+	// Loading indicator karena mengambil username butuh proses
+	loadingMsg, _ := s.ChannelMessageSend(m.ChannelID, "🔄 Mengambil data leaderboard...")
+
+	var title string
+	var descriptionBuilder strings.Builder
+	var entries []database.LeaderboardEntry // Asumsi struct ini ada di repository.go
+	var err error
+
+	// 1. Tentukan Tipe Leaderboard & Ambil Data
+	category := strings.ToLower(parts[1])
+	if category == "voice" {
+		title = "🗣️ Voice Leaderboard"
+		entries, err = b.repository.GetVoiceLeaderboard(m.GuildID, 10)
+	} else if category == "play" && len(parts) >= 3 {
+		gameName := strings.Join(parts[2:], " ")
+		title = fmt.Sprintf("🎮 Leaderboard: %s", gameName)
+		entries, err = b.repository.GetActivityLeaderboard(gameName, 10)
+	} else {
+		s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
+		s.ChannelMessageSend(m.ChannelID, "❌ Kategori tidak dikenali. Gunakan `voice` atau `play <game>`.")
+		return
 	}
+
+	if err != nil {
+		s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
+		s.ChannelMessageSend(m.ChannelID, "❌ Gagal mengambil data database.")
+		return
+	}
+
+	if len(entries) == 0 {
+		s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
+		s.ChannelMessageSend(m.ChannelID, "📭 Belum ada data untuk leaderboard ini.")
+		return
+	}
+
+	// 2. Format Tampilan (Looping Data)
+	for i, entry := range entries {
+		// Ambil Username Asli dari Discord (Tanpa Ping)
+		var username string
+		user, err := s.User(entry.UserID)
+		if err != nil {
+			username = "Unknown User"
+		} else {
+			// Prioritaskan GlobalName (Display Name) jika ada, fallback ke Username
+			if user.GlobalName != "" {
+				username = user.GlobalName
+			} else {
+				username = user.Username
+			}
+		}
+
+		// Tentukan Emoji Peringkat
+		rankEmoji := fmt.Sprintf("#%d", i+1)
+		switch i {
+		case 0:
+			rankEmoji = "🥇"
+		case 1:
+			rankEmoji = "🥈"
+		case 2:
+			rankEmoji = "🥉"
+		}
+
+		// Format Baris: "🥇 **Username**\n   ⏳ 10 jam 30 menit\n"
+		descriptionBuilder.WriteString(fmt.Sprintf("%s **%s**\n   ⏳ %s\n\n", 
+			rankEmoji, 
+			username, 
+			utils.FormatDuration(entry.TotalSeconds),
+		))
+	}
+
+	// 3. Ambil Icon Guild untuk Thumbnail
+	guild, _ := s.Guild(m.GuildID)
+	guildIconURL := ""
+	if guild != nil {
+		guildIconURL = guild.IconURL("")
+	}
+
+	// 4. Buat Embed Cantik
+	embed := &discordgo.MessageEmbed{
+		Title:       title,
+		Description: descriptionBuilder.String(),
+		Color:       0xFFD700, // Warna Emas
+		Thumbnail: &discordgo.MessageEmbedThumbnail{
+			URL: guildIconURL,
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text:    fmt.Sprintf("Requested by %s", m.Author.Username),
+			IconURL: m.Author.AvatarURL(""),
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	// 5. Kirim Hasil
+	s.ChannelMessageDelete(m.ChannelID, loadingMsg.ID)
+	s.ChannelMessageSendEmbed(m.ChannelID, embed)
 }
 
 // handleActivityLeaderboard handles activity leaderboard
