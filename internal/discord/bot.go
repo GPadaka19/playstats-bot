@@ -360,7 +360,7 @@ func (b *Bot) handleStatsCommand(s *discordgo.Session, m *discordgo.MessageCreat
 func (b *Bot) handleLeaderboardCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	parts := strings.Fields(m.Content)
 	if len(parts) < 2 {
-		s.ChannelMessageSend(m.ChannelID, "Format: `!leaderboard voice` atau `!leaderboard play <game>`")
+		s.ChannelMessageSend(m.ChannelID, "Format: `!lb voice` atau `!lb play <nama game/apps>`")
 		return
 	}
 	
