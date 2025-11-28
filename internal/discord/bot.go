@@ -282,8 +282,12 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 
 	activeSet := make(map[string]bool)
 	for _, act := range p.Activities {
-		if act.Name == "Hang Status" { continue }
-		if act.Name != "" { activeSet[act.Name] = true }
+		if act.Name == "Hang Status" || act.Name == "Custom Status" {
+			continue
+		}
+		if act.Name != "" {
+			activeSet[act.Name] = true
+		}
 	}
 	
 	for key, start := range b.activitySessions {
@@ -303,7 +307,7 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 			b.repository.AddDailyStats(date, userID, p.GuildID, 0, seconds, activityName)
 			b.repository.AddWeeklyStats(weekStart, userID, p.GuildID, 0, seconds, activityName)
 			
-			log.Printf("🎮 STOP: %s | %s (+%ds)", username, activityName, seconds)
+			log.Printf("🎮 STOP: %s | %s (+%ds)", userID, username, activityName, seconds)
 		}
 	}
 
@@ -311,7 +315,7 @@ func (b *Bot) presenceUpdate(s *discordgo.Session, p *discordgo.PresenceUpdate) 
 		key := userID + ":" + name
 		if b.activitySessions[key].IsZero() {
 			b.activitySessions[key] = time.Now().UTC()
-			log.Printf("🎮 START: %s | %s", username, name)
+			log.Printf("🎮 START: %s | %s", userID, username, name)
 		}
 	}
 }
